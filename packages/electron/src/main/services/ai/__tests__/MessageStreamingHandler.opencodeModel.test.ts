@@ -191,6 +191,7 @@ vi.mock("../../tutorial/tutorialAnalytics", () => ({
 }));
 
 import { MessageStreamingHandler } from "../MessageStreamingHandler";
+import { findWindowByWorkspace } from "../../../window/WindowManager";
 
 /**
  * OpenCode replaces its whole config on every `initialize`, which is how the
@@ -239,6 +240,7 @@ async function runTurn(options: {
   session: Record<string, unknown>;
   provider: RecordingProvider;
   sessionManager?: Record<string, unknown>;
+  service?: Record<string, unknown>;
 }) {
   mocks.providerFactory.createProvider.mockReturnValue(options.provider);
 
@@ -267,6 +269,7 @@ async function runTurn(options: {
     tryDispatchNextQueuedPrompt: vi.fn(async () => false),
     requestQueueDrive: vi.fn(),
     createToolHandler: vi.fn(() => vi.fn()),
+    ...options.service,
   };
 
   await new MessageStreamingHandler(service as never).handle(
@@ -276,6 +279,8 @@ async function runTurn(options: {
     options.session.id as string,
     options.session.workspacePath as string
   );
+
+  return service;
 }
 
 describe("MessageStreamingHandler OpenCode turn config", () => {
@@ -387,5 +392,54 @@ describe("MessageStreamingHandler OpenCode context usage", () => {
     expect(persisted.contextWindow).toBeUndefined();
     // Compaction reset the context, not what the session has spent.
     expect(persisted.totalTokens).toBe(132);
+  });
+});
+
+/**
+ * `teammate:messageWhileIdle` is installed for every provider, so it is tested
+ * here rather than in a second copy of this file's mock harness.
+ */
+describe("MessageStreamingHandler teammate delivery while the session is idle", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.providerFactory.getProvider.mockReturnValue(null);
+  });
+
+  // A handover forces the session idle so the waiting prompt can dispatch, and
+  // that prompt's startSession() is an IPC round trip, a queue pass and a
+  // window build away. A background agent finishing inside that gap reaches
+  // this listener with its message already drained out of the teammate queue —
+  // so before #1269 the guard below returned and the agent's result was gone
+  // with nothing left holding it.
+  it("keeps a message that lands while the query is parked for a follow-up turn", async () => {
+    const session = openCodeSession({ id: "handover-session" });
+    const provider = new RecordingProvider();
+    const hasParkedLeaseForSession = vi.fn(() => false);
+    (provider as unknown as Record<string, unknown>).hasParkedLeaseForSession = hasParkedLeaseForSession;
+    const sendMessageHandler = vi.fn(async () => {});
+    vi.mocked(findWindowByWorkspace).mockReturnValue({
+      isDestroyed: () => false,
+      webContents: { mainFrame: {} },
+    } as never);
+
+    await runTurn({ session, provider, service: { sendMessageHandler } });
+
+    // The session is inactive throughout: isSessionActive() is false in both
+    // acts, so the only thing that differs is whether a query is parked.
+    expect(mocks.stateManager.isSessionActive()).toBe(false);
+
+    provider.emit("teammate:messageWhileIdle", { sessionId: session.id, message: "sweep A finished" });
+    await new Promise((resolve) => setImmediate(resolve));
+    // Genuinely ended session — unchanged, the message is still dropped.
+    expect(sendMessageHandler).not.toHaveBeenCalled();
+
+    hasParkedLeaseForSession.mockReturnValue(true);
+    provider.emit("teammate:messageWhileIdle", { sessionId: session.id, message: "sweep B finished" });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(sendMessageHandler.mock.calls.map((call) => (call as unknown as unknown[])[1]))
+      .toEqual(["sweep B finished"]);
+    expect(hasParkedLeaseForSession).toHaveBeenLastCalledWith("handover-session");
   });
 });

@@ -97,6 +97,26 @@ export interface PackagedBuildOptions {
   pathToClaudeCodeExecutable?: string;
 }
 
+/**
+ * The payload for a user turn injected into an already-running query.
+ *
+ * Shared by both delivery routes — the teammate path, which wraps it in a
+ * one-shot stream for `streamInput()`, and the handover adoption, which pushes
+ * it onto the live prompt stream — so an injected turn is built in exactly one
+ * place. #1269.
+ */
+export function buildInjectedUserMessage(content: string): SDKUserMessage {
+  return {
+    type: 'user',
+    message: {
+      role: 'user',
+      content,
+    },
+    parent_tool_use_id: null,
+    session_id: '',  // Populated by SDK on delivery
+  };
+}
+
 // ─── Class ──────────────────────────────────────────────────────────────────
 
 export class TeammateManager {
@@ -211,15 +231,7 @@ export class TeammateManager {
    * Public so ClaudeCodeProvider can use it for streamInput injection.
    */
   createInjectedUserMessageStream(content: string): AsyncIterable<SDKUserMessage> {
-    const payload: SDKUserMessage = {
-      type: 'user',
-      message: {
-        role: 'user',
-        content,
-      },
-      parent_tool_use_id: null,
-      session_id: '',  // Populated by SDK on delivery
-    };
+    const payload = buildInjectedUserMessage(content);
     async function* stream() {
       yield payload;
     }

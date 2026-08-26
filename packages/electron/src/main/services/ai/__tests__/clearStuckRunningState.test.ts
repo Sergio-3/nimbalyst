@@ -27,6 +27,19 @@ describe('clearStuckRunningState', () => {
     expect(interruptSession).toHaveBeenCalledWith('s1');
   });
 
+  // A handover reports a live turn (hadActiveTurn is not false), but that turn is
+  // over — its query was passed to the follow-up turn and nothing will ever send a
+  // terminal transition for it. Without forcing idle, the queued prompt the
+  // handover was made for strands behind `session-busy`. #1269.
+  it('forces idle after a handover, even though a turn was live', async () => {
+    const { deps, interruptSession } = createDeps({ status: 'running', isStreaming: true });
+
+    await expect(
+      clearStuckRunningState(deps, { sessionId: 's1', hadActiveTurn: undefined, method: 'handover' }),
+    ).resolves.toBe(true);
+    expect(interruptSession).toHaveBeenCalledWith('s1');
+  });
+
   // The load-bearing case: a real turn winding down must keep its running state
   // until it emits its own terminal transition. Forcing idle here would let the
   // queue drive dispatch the next prompt into a still-live turn.

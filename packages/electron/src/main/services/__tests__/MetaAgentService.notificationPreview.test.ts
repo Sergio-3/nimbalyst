@@ -16,7 +16,7 @@ vi.mock('@nimbalyst/runtime/storage/repositories/AISessionsRepository', () => ({
   AISessionsRepository: { create: vi.fn(), updateMetadata: vi.fn(), get: vi.fn() },
 }));
 vi.mock('@nimbalyst/runtime/storage/repositories/AgentMessagesRepository', () => ({
-  AgentMessagesRepository: { list: vi.fn() },
+  AgentMessagesRepository: { list: vi.fn().mockResolvedValue([]) },
 }));
 vi.mock('@nimbalyst/runtime/storage/repositories/SessionFilesRepository', () => ({
   SessionFilesRepository: { getFilesBySession: vi.fn().mockResolvedValue([]) },
@@ -69,6 +69,9 @@ vi.mock('../ai/claudeCliLauncherSingleton', () => ({
   ClaudeCliLauncherConfig: { setMetaAgentServerPort: vi.fn() },
 }));
 
+import { AISessionsRepository } from '@nimbalyst/runtime/storage/repositories/AISessionsRepository';
+import { database as databaseWorker } from '../../database/PGLiteDatabaseWorker';
+import { computeNotificationSignature } from '../metaAgentNotificationSignature';
 import { MetaAgentService } from '../MetaAgentService';
 
 function baseResult(overrides: Record<string, unknown> = {}) {
@@ -163,5 +166,50 @@ describe('MetaAgentService.buildNotificationMessage originalPrompt preview (FIX 
 
     expect(result.originalPrompt).toBe(longPrompt);
     expect(result.originalPrompt!.length).toBe(5000);
+  });
+});
+
+describe('MetaAgentService child-event suppression while a prompt waits (#1269)', () => {
+  it('suppresses session:interrupted only while the child still has a prompt queued', async () => {
+    const service = MetaAgentService.getInstance();
+    const notify = vi.fn();
+    (service as any).aiService = {
+      queuePromptForSession: notify,
+      triggerQueuedPromptProcessingForSession: vi.fn(),
+    };
+    (service as any).notificationSignatures.clear();
+    vi.mocked(computeNotificationSignature).mockReturnValue('sig' as any);
+    vi.mocked(AISessionsRepository.get).mockImplementation((async (id: string) =>
+      id === 'child-1'
+        ? {
+            id,
+            title: 'Child',
+            provider: 'claude-code',
+            model: null,
+            agentRole: 'standard',
+            createdBySessionId: 'meta-1',
+            workspacePath: '/ws',
+            metadata: {},
+            createdAt: 1,
+            updatedAt: 2,
+            worktreeId: null,
+          }
+        : { id, workspacePath: '/ws' }) as any);
+
+    let pending = 1;
+    vi.mocked(databaseWorker.query).mockImplementation((async (sql: string) =>
+      sql.includes('queued_prompts') ? { rows: [{ count: String(pending) }] } : { rows: [] }) as any);
+
+    // Handover: the interrupt exists so the waiting prompt can dispatch, and the
+    // child keeps working right through it. Telling the parent its child was
+    // interrupted makes it re-plan around work that is still running.
+    await (service as any).handleChildSessionEvent('child-1', 'session:interrupted');
+    expect(notify).not.toHaveBeenCalled();
+
+    // Empty queue: a genuine stop, which the parent still has to hear about.
+    pending = 0;
+    await (service as any).handleChildSessionEvent('child-1', 'session:interrupted');
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][1]).toContain('Event: session:interrupted');
   });
 });
