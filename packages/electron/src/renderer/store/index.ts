@@ -126,6 +126,7 @@ export {
   sessionUpdatedAtAtom,
   sessionStatusAtom,
   sessionCurrentTeammatesAtom,
+  sessionBackgroundDrainAtom,
   sessionCurrentTodosAtom,
   sessionWorktreePathAtom,
   sessionDocumentContextAtom,
