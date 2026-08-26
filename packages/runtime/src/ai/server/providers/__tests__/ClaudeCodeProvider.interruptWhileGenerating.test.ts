@@ -167,6 +167,7 @@ function internals(provider: ClaudeCodeProvider) {
   return provider as unknown as {
     activeTasks: Map<string, { status: string }>;
     drainingBackgroundTasks: boolean;
+    promptEndTimer: ReturnType<typeof setTimeout> | null;
   };
 }
 
@@ -217,6 +218,14 @@ describe('ClaudeCodeProvider send-now while the lead is still generating', () =>
         400,
       );
 
+      // The discard has to reach the grace timer too. It arms on any `result`
+      // chunk and its expiry ends the prompt stream — the very kill the park
+      // exists to prevent, only deferred by the grace window. Read BEFORE turn B
+      // produces anything: its first chunk re-arms the timer as
+      // reset-on-activity and would make an armed and a disarmed provider look
+      // identical from here.
+      const countdownArmedByDiscardedResult = state.promptEndTimer !== null;
+
       // Turn B's own work, on the query it is supposed to have adopted.
       cli[0].emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'following up' }] } });
       cli[0].emit({ type: 'result', subtype: 'success', result: 'follow-up done', usage: {} });
@@ -234,6 +243,8 @@ describe('ClaudeCodeProvider send-now while the lead is still generating', () =>
       expect.soft(carriedTheQuery, 'the follow-up turn must adopt the parked query instead of spawning a second subprocess')
         .toBe(true);
       expect.soft(endedOnInheritedResult, "the abandoned generation's result must not end the follow-up turn")
+        .toBe(false);
+      expect.soft(countdownArmedByDiscardedResult, "the discarded result must not arm the prompt-end countdown — its expiry closes stdin and kills the parked sub-agent")
         .toBe(false);
       expect.soft(completedOnItsOwnResult, 'the follow-up turn must still end on its OWN result — the discard applies once')
         .toBe(true);

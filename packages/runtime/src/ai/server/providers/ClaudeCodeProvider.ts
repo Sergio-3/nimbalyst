@@ -1453,6 +1453,15 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
           // can_use_tool requests (the original "Stream closed" trigger)
           // complete on the still-open stdin while still letting the turn
           // finish in a bounded amount of time.
+          // The `result` of the generation the park abandoned, inherited with
+          // the query: it belongs to the turn that is gone and is dropped below.
+          // Decided HERE, before the grace-timer gate rather than beside the
+          // drop, because both need the answer and the flag is consumed by the
+          // first `result` this turn reads. #1269.
+          const inheritedResult = discardInheritedResult
+            && typeof chunk === 'object' && chunk !== null && chunk.type === 'result';
+          if (inheritedResult) discardInheritedResult = false;
+
           if (typeof chunk === 'object' && chunk !== null) {
             // A notification-flush result (num_turns=0, no output, emitted on
             // resume before the real turn runs) is NOT end-of-turn. Arming the
@@ -1465,6 +1474,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
               chunk,
               sawTaskNotificationThisTurn,
               sawAssistantOutputThisTurn,
+              inheritedResult,
             );
             if (armsGraceTimer && resultReceivedTime === null) {
               resultReceivedTime = Date.now();
@@ -1902,13 +1912,9 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
           // afterward. Keep the loop (and the control channel) alive; the real
           // result completes the turn, and the post-loop fallback covers the
           // case where it never arrives. See NIM-1470.
-          // Same disposal for the result of the generation the park abandoned:
-          // it belongs to the turn that is gone, and reading it here would end
-          // this one before it answered.
-          const inheritedResult = discardInheritedResult
-            && typeof chunk === 'object' && chunk !== null && chunk.type === 'result';
-          if (inheritedResult) discardInheritedResult = false;
-
+          // `inheritedResult` (decided at the top of the loop body) gets the
+          // same disposal: it belongs to the turn that is gone, and reading it
+          // here would end this one before it answered.
           if (
             typeof chunk === 'object' && chunk !== null && !completeEmitted
             && (inheritedResult
@@ -2699,10 +2705,16 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
     // comes. Let it fall back to a real interrupt instead.
     if (this.handover) return false;
 
-    console.log(`[CLAUDE-CODE] ${caller}: only background sub-agents hold the query open; handing it to the follow-up turn instead of interrupting`);
+    // Both entries land here, and they differ in what still holds the query: a
+    // drain has only the sub-agents, an interrupted generation also has a lead
+    // mid-answer. Naming the wrong one sends the next reader of this log looking
+    // for a drain that never opened. #1269.
+    const interruptedGeneration = !this.drainingBackgroundTasks;
+    console.log(`[CLAUDE-CODE] ${caller}: ${interruptedGeneration
+      ? 'the lead is still generating and background sub-agents are running'
+      : 'only background sub-agents hold the query open'}; handing the query to the follow-up turn instead of interrupting`);
     let settle!: (parked: boolean) => void;
     const parked = new Promise<boolean>(resolve => { settle = resolve; });
-    const interruptedGeneration = !this.drainingBackgroundTasks;
     this.handover = { state: 'requested', resolveParked: settle, interruptedGeneration };
     // Wake the loop's race so it leaves the drain now instead of waiting for the
     // next chunk — a quiet sub-agent can be silent for minutes.

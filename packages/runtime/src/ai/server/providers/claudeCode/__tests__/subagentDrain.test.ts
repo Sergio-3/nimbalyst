@@ -193,6 +193,14 @@ describe('shouldArmGraceTimerForResult', () => {
     expect(shouldArmGraceTimerForResult({ type: 'assistant' }, true, false)).toBe(false);
     expect(shouldArmGraceTimerForResult({ type: 'user' }, false, false)).toBe(false);
   });
+
+  // Regression: #1269. The adopting turn drops the abandoned generation's
+  // result, but the arming gate sits earlier in the streaming loop than the
+  // drop — so the dropped chunk still started the countdown, and its expiry
+  // ends the prompt stream that keeps the parked sub-agents alive.
+  it('does NOT arm on a result the adopting turn is about to discard', () => {
+    expect(shouldArmGraceTimerForResult(realResult, false, false, true)).toBe(false);
+  });
 });
 
 describe('shouldContinueWithTaskResults', () => {
