@@ -953,6 +953,16 @@ export const sessionCurrentTeammatesAtom = atomFamily((sessionId: string) =>
   })
 );
 
+/**
+ * True while the lead turn has finished and only background sub-agents keep the
+ * provider's query open. Written by ClaudeCodeProvider into session metadata;
+ * it is the one window in which "send now" hands the live query to the waiting
+ * prompt instead of interrupting it and killing those sub-agents. #1269.
+ */
+export const sessionBackgroundDrainAtom = atomFamily((sessionId: string) =>
+  atom((get) => get(sessionStoreAtom(sessionId))?.metadata?.backgroundDrain === true)
+);
+
 export const sessionCurrentTodosAtom = atomFamily((sessionId: string) =>
   atom((get) => {
     const raw = get(sessionStoreAtom(sessionId))?.metadata?.currentTodos;

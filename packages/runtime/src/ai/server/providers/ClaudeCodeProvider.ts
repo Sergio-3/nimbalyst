@@ -262,6 +262,12 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
   // is still iterating to drain background sub-agents that outlived the turn.
   // See subagentDrain.ts and NIM-1344 / GitHub #732.
   private drainingBackgroundTasks: boolean = false;
+  // Last drain state mirrored into session metadata for the renderer, so an
+  // unchanged state costs no write. `null` means "nothing written by this
+  // instance yet", which makes the first turn overwrite whatever a crashed run
+  // left behind — a stale `true` would show the send-now button as harmless
+  // while a lead turn is running. See emitBackgroundDrainUpdate(). #1269.
+  private publishedBackgroundDrain: boolean | null = null;
   // Why the current streaming loop stopped iterating. Set at each loop-exit point
   // so finalizeBackgroundDrain() can tell a user stop / supersede (no continuation)
   // apart from an unexpected sub-agent death (auto-continue). Reset each turn.
@@ -884,6 +890,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       this.teammateIdleMessagePending = false;
       // Reset per-turn background-drain state (defensive; also reset in finally).
       this.drainingBackgroundTasks = false;
+      void this.emitBackgroundDrainUpdate(sessionId);
       this.drainExitCause = 'resolved';
       // Resume from the parked turn's notifications, so this turn's drain
       // carries them into the continuation.
@@ -1615,6 +1622,10 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
             const willDrainSubagents = shouldDeferTeardownForSubagents(this.hasRunningTasks());
             if (willDrainSubagents) {
               this.drainingBackgroundTasks = true;
+              // Tell the renderer the lead is done and only sub-agents remain, so
+              // the send-now button can show that a click now hands the query over
+              // rather than killing them. #1269.
+              void this.emitBackgroundDrainUpdate(sessionId);
             }
             // Same ordering constraint for the "settled during the turn" trigger:
             // willResumeAfterCompletion() reads it while the consumer handles the
@@ -1897,6 +1908,12 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       if (!parkedThisTurn) {
         this.drainingBackgroundTasks = false;
       }
+      // Publish whichever value now holds -- false after a normal turn, still
+      // true across a handover window. The send-now traffic light reads this
+      // field, and without a write here the end of a turn never reaches it.
+      // emitBackgroundDrainUpdate() debounces against publishedBackgroundDrain,
+      // so the handover case costs nothing.
+      void this.emitBackgroundDrainUpdate(sessionId);
       this.drainExitCause = 'resolved';
       this.drainTerminalNotifications = [];
       this.drainGraceExpired = false;
@@ -3173,12 +3190,52 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
         metadata: {
           ...currentMetadata,
           currentTasks: Array.from(this.activeTasks.values()),
+          // Carried along because this read-modify-write races the drain update
+          // below; without it a task notification arriving right after the drain
+          // began would write the pre-drain metadata back.
+          backgroundDrain: this.drainingBackgroundTasks,
         }
       });
 
       this.emit('message:logged', { sessionId, direction: 'output' });
     } catch (error) {
       console.error('[CLAUDE-CODE] Failed to update session metadata with tasks:', error);
+    }
+  }
+
+  /**
+   * Mirror `drainingBackgroundTasks` into session metadata, on the same route the
+   * sub-agent task list already takes to the renderer.
+   *
+   * The send-now button needs the distinction the renderer otherwise lacks: while
+   * the lead turn is still writing, a click interrupts and the CLI kills every
+   * running background sub-agent; once only sub-agents hold the query open,
+   * requestQueryHandover() can park the query for the follow-up turn and nothing
+   * dies. Display only — nothing here decides anything. #1269.
+   */
+  private async emitBackgroundDrainUpdate(sessionId: string | undefined): Promise<void> {
+    if (!sessionId) return;
+    const draining = this.drainingBackgroundTasks;
+    if (this.publishedBackgroundDrain === draining) return;
+    this.publishedBackgroundDrain = draining;
+
+    try {
+      const { AISessionsRepository } = await import('../../../storage/repositories/AISessionsRepository');
+      const currentSession = await AISessionsRepository.get(sessionId);
+
+      await AISessionsRepository.updateMetadata(sessionId, {
+        metadata: {
+          ...(currentSession?.metadata || {}),
+          backgroundDrain: draining,
+        }
+      });
+
+      this.emit('message:logged', { sessionId, direction: 'output' });
+    } catch (error) {
+      // Forget what we claimed to have written so the next transition retries.
+      // A `true` left over from a failed write reads as "safe to click".
+      this.publishedBackgroundDrain = null;
+      console.error('[CLAUDE-CODE] Failed to update session metadata with background drain state:', error);
     }
   }
 
