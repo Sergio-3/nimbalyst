@@ -12,24 +12,32 @@ const prompt = (attachments?: QueuedPrompt['attachments']): QueuedPrompt => ({
 const withAttachment = prompt([{ id: 'a1', filename: 'shot.png', type: 'image' }]);
 
 describe('sendNowOutcome', () => {
-  it('only reports a handover while the lead turn is done and the waiting prompt has no attachments', () => {
-    expect(sendNowOutcome(true, prompt())).toBe('handover');
-    expect(sendNowOutcome(true, prompt([]))).toBe('handover');
-  });
-
-  it('reports an interrupt while the lead turn is still running', () => {
-    expect(sendNowOutcome(false, prompt())).toBe('interrupt');
+  it('warns only while a delegated task would die with the interrupt', () => {
+    expect(sendNowOutcome(false, prompt(), true)).toBe('interrupt');
     // Attachments do not matter here -- the turn is interrupted either way.
-    expect(sendNowOutcome(false, withAttachment)).toBe('interrupt');
+    expect(sendNowOutcome(false, withAttachment, true)).toBe('interrupt');
   });
 
-  it('reports an interrupt when the waiting prompt carries attachments, drain or not', () => {
+  it('warns during the drain when the waiting prompt carries attachments', () => {
     // The main process refuses the handover for these (AIService: canAdoptQuery),
     // so a green light here would be a lie.
-    expect(sendNowOutcome(true, withAttachment)).toBe('interrupt-attachments');
+    expect(sendNowOutcome(true, withAttachment, true)).toBe('interrupt-attachments');
   });
 
-  it('treats an empty queue as an interrupt', () => {
-    expect(sendNowOutcome(false, undefined)).toBe('interrupt');
+  it('stays silent with no running task, whatever else is true', () => {
+    expect(sendNowOutcome(false, prompt(), false)).toBe('safe');
+    expect(sendNowOutcome(false, withAttachment, false)).toBe('safe');
+    expect(sendNowOutcome(true, withAttachment, false)).toBe('safe');
+  });
+
+  it('stays silent when the handover keeps the running tasks alive', () => {
+    expect(sendNowOutcome(true, prompt(), true)).toBe('safe');
+    expect(sendNowOutcome(true, prompt([]), true)).toBe('safe');
+  });
+
+  it('treats an empty queue like any other prompt without attachments', () => {
+    expect(sendNowOutcome(false, undefined, true)).toBe('interrupt');
+    expect(sendNowOutcome(true, undefined, true)).toBe('safe');
+    expect(sendNowOutcome(false, undefined, false)).toBe('safe');
   });
 });
