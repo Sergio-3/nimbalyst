@@ -59,10 +59,17 @@ export function extractToolResultText(content: unknown): string {
 export function shouldSettleTaskFromToolResult(
   task: { taskType?: string; isBackgrounded?: boolean; status: string },
   resultContent: unknown,
+  isError = false,
 ): boolean {
   if (task.status !== 'running') return false;
-  // local_bash tasks only exist when a Bash command was backgrounded; their
-  // matching tool_result is always the launch acknowledgement.
+  // An errored tool_result means nothing was launched — no shell, no sub-agent —
+  // so no task_notification will ever arrive to settle this entry. A denied
+  // permission lands here too: its result is the denial, not an acknowledgement.
+  // Left running, the entry outlives the turn, holds the drain open and keeps
+  // the send-now warning red until an interrupt sweeps it.
+  if (isError) return true;
+  // Otherwise a local_bash task only exists because a Bash command was
+  // backgrounded; its matching tool_result is the launch acknowledgement.
   if (task.taskType === 'local_bash') return false;
   // Authoritative signal from a task_updated patch, when the CLI sent one.
   if (task.isBackgrounded) return false;

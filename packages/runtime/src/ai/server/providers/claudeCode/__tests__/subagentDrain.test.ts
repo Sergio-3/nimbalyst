@@ -35,6 +35,24 @@ describe('shouldSettleTaskFromToolResult', () => {
     expect(shouldSettleTaskFromToolResult(task, 'exit code 0')).toBe(false);
   });
 
+  // A denied permission produces an error tool_result instead of a launch
+  // acknowledgement: no shell was started, so no task_notification will ever
+  // arrive. Measured on 2026-08-26 -- a rejected `npm run typecheck` sat in the
+  // task list as "running" until the next interrupt swept it, holding the drain
+  // open and the send-now warning red the whole time.
+  it('settles a local_bash task whose call was denied', () => {
+    const task = { taskType: 'local_bash', status: 'running' };
+    const denial =
+      "The user doesn't want to proceed with this tool use. The tool use was rejected "
+      + '(eg. if it was a file edit, the new_string was NOT written to the file).';
+    expect(shouldSettleTaskFromToolResult(task, denial, true)).toBe(true);
+  });
+
+  it('settles a backgrounded sub-agent whose launch call errored', () => {
+    const task = { taskType: 'local_agent', status: 'running' };
+    expect(shouldSettleTaskFromToolResult(task, 'Error: agent type not found', true)).toBe(true);
+  });
+
   it('does not settle a backgrounded sub-agent (task_updated is_backgrounded)', () => {
     const task = { taskType: 'local_agent', isBackgrounded: true, status: 'running' };
     expect(shouldSettleTaskFromToolResult(task, 'some agent output')).toBe(false);

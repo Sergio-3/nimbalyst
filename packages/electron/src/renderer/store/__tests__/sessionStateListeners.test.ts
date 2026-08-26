@@ -23,6 +23,7 @@ import {
   sessionChildrenAtom,
   sessionLastActivityAtom,
   sessionListWorkspaceAtom,
+  sessionBackgroundDrainAtom,
   selectedWorkstreamAtom,
   type SessionMeta,
 } from '../atoms/sessions';
@@ -965,4 +966,76 @@ describe('processing reconcile on terminal events', () => {
       vi.useRealTimers();
     }
   });
+});
+
+/**
+ * The send-now traffic light reads `metadata.backgroundDrain`, which the
+ * provider writes exactly once per transition and announces with a single
+ * `ai:message-logged`. Both reload paths that follow a turn's end funnel
+ * through the main process's `ai:loadSession`, which de-duplicates concurrent
+ * calls onto whichever read is already in flight. A reload triggered by the
+ * drain announcement can therefore be served a snapshot taken BEFORE the drain
+ * was written -- and because the announcement never repeats, the light stays
+ * red for the whole drain.
+ */
+describe('background drain reaching the send-now light', () => {
+  const preDrain = { backgroundDrain: false, currentTasks: [{ taskId: 't1', description: 'agent', status: 'running', startedAt: 0, toolCount: 0, tokenCount: 0, durationMs: 0 }] };
+  const postDrain = { ...preDrain, backgroundDrain: true };
+
+  it('flips the atom when the reload carries the drain flag', async () => {
+    const sid = uniqueSessionId('drain-plain');
+    seedRegistry([{ id: sid, workspaceId: WS }]);
+    (window.electronAPI as any).aiLoadSession = vi.fn(async () => ({
+      id: sid, provider: 'claude-code', messages: [], metadata: postDrain,
+    }));
+
+    handlers.get('ai:message-logged')!({ sessionId: sid, direction: 'output', workspacePath: WS });
+
+    await vi.waitFor(() => {
+      expect(store.get(sessionBackgroundDrainAtom(sid))).toBe(true);
+    });
+  });
+
+  it('still flips when a reload started before the write is in flight alongside it', async () => {
+    const sid = uniqueSessionId('drain-dedup');
+    seedRegistry([{ id: sid, workspaceId: WS }]);
+
+    // Mirrors AIService's `loadSessionInFlight`: a second call arriving while a
+    // read is outstanding gets that read's promise, not a fresh one. The first
+    // read starts before the provider persists backgroundDrain, so it resolves
+    // with the pre-drain metadata.
+    // `stored` is the database. A read resolves with whatever it holds when the
+    // read STARTED -- that is the whole point: the first read starts before the
+    // provider persists the flag, so its snapshot predates the write even though
+    // it resolves after it.
+    let stored: Record<string, unknown> = preDrain;
+    let inFlight: Promise<any> | null = null;
+    let releaseFirstRead!: () => void;
+    const firstReadGate = new Promise<void>(resolve => { releaseFirstRead = resolve; });
+    (window.electronAPI as any).aiLoadSession = vi.fn(() => {
+      if (inFlight) return inFlight;
+      const snapshot = stored;
+      inFlight = (async () => {
+        await firstReadGate;
+        inFlight = null;
+        return { id: sid, provider: 'claude-code', messages: [], metadata: snapshot };
+      })();
+      return inFlight;
+    });
+
+    // Turn end: session:completed reloads immediately (read starts, stale).
+    handlers.get('ai-session-state:event')!({ type: 'session:completed', sessionId: sid, workspacePath: WS });
+    // Provider then writes backgroundDrain: true and announces it once.
+    stored = postDrain;
+    handlers.get('ai:message-logged')!({ sessionId: sid, direction: 'output', workspacePath: WS });
+    releaseFirstRead();
+
+    // Nothing else announces the drain, so this is the light's only chance.
+    await vi.waitFor(() => {
+      expect((window.electronAPI as any).aiLoadSession).toHaveBeenCalled();
+    });
+    await new Promise(resolve => setTimeout(resolve, 1500));
+
+    expect(store.get(sessionBackgroundDrainAtom(sid))).toBe(true);
+  }, 15000);
 });

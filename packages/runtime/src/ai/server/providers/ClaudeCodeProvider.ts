@@ -1732,7 +1732,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
                       // until completion). A backgrounded task's tool_result is a
                       // launch acknowledgement while it is still running; settling
                       // on it killed the task at turn-end teardown. NIM-1470.
-                      if (task.toolUseId === item.toolUseId && shouldSettleTaskFromToolResult(task, item.content)) {
+                      if (task.toolUseId === item.toolUseId && shouldSettleTaskFromToolResult(task, item.content, toolCall.isError === true)) {
                         task.status = toolCall.isError ? 'failed' : 'completed';
                         const summaryText = extractToolResultText(item.content);
                         if (summaryText) task.summary = summaryText.substring(0, 200);
