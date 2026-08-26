@@ -98,6 +98,7 @@ import {
   // Centralized transcript state atoms
   sessionErrorAtom,
   sessionQueuedPromptsAtom,
+  sessionBackgroundDrainAtom,
   sessionPendingReviewFilesAtom,
   clearSessionError,
   loadInitialQueuedPrompts,
@@ -477,6 +478,10 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
   // memo comparators. Subscribing here was repainting the input/queue/banners
   // every few ms and breaking text selection.
   const sessionStatus = useAtomValue(sessionStatusAtom(sessionId));
+  // Splits the single "busy" state the queue's send-now button used to show:
+  // during the drain a click hands the query over, otherwise it interrupts and
+  // takes running background sub-agents with it. #1269.
+  const backgroundDrainActive = useAtomValue(sessionBackgroundDrainAtom(sessionId));
   const metadataTeammates = useAtomValue(sessionCurrentTeammatesAtom(sessionId));
   const currentTodos = useAtomValue(sessionCurrentTodosAtom(sessionId)) as Todo[];
   const sessionWorktreePath = useAtomValue(sessionWorktreePathAtom(sessionId));
@@ -2778,6 +2783,7 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
         onCancel={handleCancelQueuedPrompt}
         onEdit={handleEditQueuedPrompt}
         onSendNow={isLoading && !isClaudeCliTerminalSession(provider) ? handleSendNowQueuedPrompt : undefined}
+        backgroundDrainActive={backgroundDrainActive}
       />
 
       {/* Note: All interactive prompts (ToolPermission, ExitPlanMode, AskUserQuestion) use inline widgets in transcript */}
