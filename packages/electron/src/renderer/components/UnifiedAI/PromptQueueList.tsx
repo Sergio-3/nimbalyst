@@ -20,18 +20,28 @@ interface PromptQueueListProps {
   onSendNow?: (id: string, prompt: string) => void;
   /** Lead turn finished, only background sub-agents still hold the query open. */
   backgroundDrainActive?: boolean;
+  /** At least one delegated task is in `running` state — foreground or background. */
+  hasRunningTasks?: boolean;
 }
 
 /** What a send-now click does to work that is currently running. */
-export type SendNowOutcome = 'handover' | 'interrupt' | 'interrupt-attachments';
+export type SendNowOutcome = 'safe' | 'interrupt' | 'interrupt-attachments';
 
 /**
- * Decide what a send-now click does right now, from the same two facts the main
- * process uses in ClaudeCodeProvider.requestQueryHandover: the query is only
- * handed over — leaving running background sub-agents alive — while the lead
- * turn is already done (`backgroundDrainActive`) AND the waiting prompt can run
- * on the open query, which attachments rule out. Anything else interrupts, and
- * the CLI takes every running sub-agent down with it.
+ * Decide whether a send-now click destroys running work.
+ *
+ * Only one thing can be destroyed: a delegated task that is running right now.
+ * So if none is, the click is `safe` whatever else is true — it still interrupts
+ * the current answer, but that is precisely what the user asked for by clicking.
+ * That case is deliberately not told apart from the handover below: both leave
+ * every running task alive, and a distinction the user cannot act on only trains
+ * them to stop reading the warning.
+ *
+ * With tasks running, the query has to be *handed over* rather than interrupted
+ * to keep them — which needs the same two facts the main process checks in
+ * ClaudeCodeProvider.requestQueryHandover: the lead turn is already done
+ * (`backgroundDrainActive`) AND the waiting prompt can run on the open query,
+ * which attachments rule out.
  *
  * The decision reads the HEAD of the queue, not the row that was clicked: the
  * button interrupts the turn and the main process then dispatches whatever is
@@ -40,16 +50,18 @@ export type SendNowOutcome = 'handover' | 'interrupt' | 'interrupt-attachments';
 export function sendNowOutcome(
   backgroundDrainActive: boolean,
   head: QueuedPrompt | undefined,
+  hasRunningTasks: boolean,
 ): SendNowOutcome {
+  if (!hasRunningTasks) return 'safe';
+  const headHasAttachments = !!head?.attachments && head.attachments.length > 0;
   if (!backgroundDrainActive) return 'interrupt';
-  if (head?.attachments && head.attachments.length > 0) return 'interrupt-attachments';
-  return 'handover';
+  return headHasAttachments ? 'interrupt-attachments' : 'safe';
 }
 
 const SEND_NOW_TITLES: Record<SendNowOutcome, string> = {
-  handover: 'Sends now without cost: the agent has finished its answer, so running background sub-agents are handed over and keep working.',
-  interrupt: 'Sends now by interrupting the agent mid-answer, which also stops every background sub-agent still running.',
-  'interrupt-attachments': 'Sends now by interrupting the agent, because the next queued prompt has attachments and needs a turn of its own — every background sub-agent still running is stopped with it.',
+  safe: 'Sends now by interrupting the agent — that ends the current answer and nothing else: no delegated task is stopped by it.',
+  interrupt: 'Sends now by interrupting the agent while it is still working — thinking and tool calls count, not just visible output — which also stops every delegated task still running.',
+  'interrupt-attachments': 'Sends now by interrupting the agent, because the next queued prompt has attachments and needs a turn of its own — every delegated task still running is stopped with it.',
 };
 
 function AttachmentIndicator({ attachments }: { attachments: QueuedPromptAttachment[] }) {
@@ -86,14 +98,14 @@ function AttachmentIndicator({ attachments }: { attachments: QueuedPromptAttachm
 /**
 - PromptQueueList - Displays queued prompts waiting to be processed
  */
-export function PromptQueueList({ queue, onCancel, onEdit, onSendNow, backgroundDrainActive = false }: PromptQueueListProps) {
+export function PromptQueueList({ queue, onCancel, onEdit, onSendNow, backgroundDrainActive = false, hasRunningTasks = false }: PromptQueueListProps) {
   if (queue.length === 0) {
     return null;
   }
 
   // Same for every row -- see sendNowOutcome().
-  const outcome = sendNowOutcome(backgroundDrainActive, queue[0]);
-  const sendNowIsSafe = outcome === 'handover';
+  const outcome = sendNowOutcome(backgroundDrainActive, queue[0], hasRunningTasks);
+  const sendNowIsSafe = outcome === 'safe';
 
   return (
     <div className="prompt-queue-list px-3 py-2 border-b border-nim bg-nim-secondary">

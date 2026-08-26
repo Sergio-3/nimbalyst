@@ -118,7 +118,7 @@ import {
   MIN_CLI_TERMINAL_HEIGHT,
   MAX_CLI_TERMINAL_HEIGHT,
 } from '../../store/atoms/terminals';
-import { scrollToTeammateAtom, scrollToMessageAtom, requestOpenSessionAtom } from '../../store/atoms/agentMode';
+import { scrollToTeammateAtom, scrollToMessageAtom, requestOpenSessionAtom, sessionTasksAtom } from '../../store/atoms/agentMode';
 import { usePostHog } from 'posthog-js/react';
 import { trackSendWallEvent } from '../../utils/sendWallAnalytics';
 import {
@@ -420,6 +420,11 @@ const LocalSessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscrip
   // during the drain a click hands the query over, otherwise it interrupts and
   // takes running background sub-agents with it. #1269.
   const backgroundDrainActive = useAtomValue(sessionBackgroundDrainAtom(sessionId));
+  // The second half of that decision: an interrupt only destroys delegated work
+  // if something is delegated right now. Foreground tasks count — they die with
+  // the query just like backgrounded ones. #1269.
+  const sessionTasks = useAtomValue(sessionTasksAtom(sessionId));
+  const hasRunningTasks = sessionTasks.some(task => task.status === 'running');
   const metadataTeammates = useAtomValue(sessionCurrentTeammatesAtom(sessionId));
   const currentTodos = useAtomValue(sessionCurrentTodosAtom(sessionId)) as Todo[];
   const sessionWorktreePath = useAtomValue(sessionWorktreePathAtom(sessionId));
@@ -2724,6 +2729,7 @@ const LocalSessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscrip
         onEdit={handleEditQueuedPrompt}
         onSendNow={isLoading && !isClaudeCliTerminalSession(provider) ? handleSendNowQueuedPrompt : undefined}
         backgroundDrainActive={backgroundDrainActive}
+        hasRunningTasks={hasRunningTasks}
       />
 
       {/* Note: All interactive prompts (ToolPermission, ExitPlanMode, AskUserQuestion) use inline widgets in transcript */}
