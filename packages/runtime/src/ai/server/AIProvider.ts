@@ -125,14 +125,12 @@ export function readProviderWorkflowCatalog(
  * What the caller already knows about the turn that will follow this interrupt.
  * Passed in rather than discovered by the provider, because the interrupt
  * handler is what holds the prompt queue. Omitted or `null` means "no follow-up
- * known", which is never a reason to hand a live query over. #1269.
+ * known", which is never a reason to hand a live query over. `canAdoptQuery`
+ * says the waiting prompt can run on the query that is already open; it is false
+ * when the prompt carries attachments, because content blocks belong to the
+ * options the running process was started with. #1269.
  */
 export interface TurnHandoverCandidate {
-  /**
-   * The waiting prompt can run on the query that is already open. False when it
-   * carries attachments: content blocks belong to the options the running
-   * process was started with, so such a prompt needs its own query.
-   */
   canAdoptQuery: boolean;
 }
 
@@ -192,9 +190,8 @@ export interface AIProvider extends EventEmitter {
    * fall back to the default `abort()` and rely on the caller to trigger the
    * next queued prompt. The return value lets the caller distinguish the two.
    *
-   * `followUp` describes the prompt waiting behind this interrupt. A provider
-   * may only hand its live query to that turn when the prompt can actually adopt
-   * it, otherwise it hands a live subprocess to a turn that never comes.
+   * Hand the live query to `followUp` only when it can adopt the query, else a
+   * live subprocess goes to a turn that never comes.
    */
   interruptCurrentTurn(followUp?: TurnHandoverCandidate | null): Promise<InterruptTurnResult>;
 

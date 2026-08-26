@@ -313,9 +313,8 @@ export type DrainExitCause =
   | 'iterator-done' // the SDK iterator ended on its own
   | 'iterator-error'; // the SDK iterator threw
 
-// Where a handover stands, from the streaming loop's point of view.
 export type HandoverState =
-  | 'requested' // someone asked, the loop has not reacted — nothing is decided
+  | 'requested' // someone asked, the streaming loop has not reacted yet
   | 'accepted' // the loop left its drain for it; only this state may park
   | 'abandoned'; // the request timed out, the caller fell back to a real interrupt
 
@@ -355,12 +354,11 @@ export function resolveHandoverPark(params: {
 }
 
 /**
- * Chunk source for the streaming loop that first consumes a read left in flight
- * by the turn that handed the query over. `Query[Symbol.asyncIterator]()` gives
- * every caller the SAME generator, so a fresh `next()` lines up BEHIND that
- * abandoned read: the first message after the handover — typically a sub-agent's
- * terminal `task_notification` — resolves a promise nobody awaits, and the task
- * stays 'running' forever. #1269.
+ * `Query[Symbol.asyncIterator]()` gives every caller the SAME generator, so a
+ * fresh `next()` lines up BEHIND the read the handing-over turn left in flight:
+ * that first message — typically a sub-agent's terminal `task_notification` —
+ * would resolve a promise nobody awaits and pin its task 'running' forever.
+ * Hence the streaming loop consumes `inFlight` before the iterator. #1269.
  */
 export function createChunkReader<T>(
   iterator: { next: () => Promise<IteratorResult<T>> },
