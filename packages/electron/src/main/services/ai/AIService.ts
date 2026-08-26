@@ -34,6 +34,7 @@ import {
   type HeadlessAgentId,
 } from './headlessAgentAvailability';
 import { getSessionStateManager } from '@nimbalyst/runtime/ai/server/SessionStateManager';
+import type { TurnHandoverCandidate } from '@nimbalyst/runtime/ai/server/AIProvider';
 import { parseContextUsageMessage } from '@nimbalyst/runtime/ai/server/utils/contextUsage';
 import { isBedrockToolSearchError } from '@nimbalyst/runtime/ai/server/utils/errorDetection';
 import { resolveEffortLevel, resolveThinkingMode } from '@nimbalyst/runtime/ai/server/effortLevels';
@@ -566,6 +567,13 @@ export class AIService {
     }
 
     this.sessionsProcessingQueue.delete(sessionId);
+    // Read AFTER the sweep, so it describes the queue the follow-up turn will
+    // actually be dispatched from. A provider that can hand its live query to
+    // that turn (#1269) may only do so when one is really waiting and can run
+    // on the open query — a prompt with attachments needs its own, because
+    // content blocks belong to the options the running process was started
+    // with. Left null on any failure: not handing over is always safe.
+    let followUp: TurnHandoverCandidate | null = null;
     try {
       const { getQueuedPromptsStore } = await import('../RepositoryManager');
       const queueStore = getQueuedPromptsStore();
@@ -576,11 +584,15 @@ export class AIService {
         );
         await this.publishQueueStateToSync(sessionId);
       }
+      const nextPending = (await queueStore.listPending(sessionId))[0];
+      if (nextPending) {
+        followUp = { canAdoptQuery: !(nextPending.attachments?.length) };
+      }
     } catch (sweepErr) {
       logger.main.error('[AIService] interruptCurrentTurn: sweepExecutingForSession failed:', sweepErr);
     }
 
-    const result = await provider.interruptCurrentTurn();
+    const result = await provider.interruptCurrentTurn(followUp);
     logger.main.info(`[AIService] Interrupted current turn for session ${sessionId} (method=${result.method})`);
 
     // A session stuck at running/streaming with no turn behind it -- because

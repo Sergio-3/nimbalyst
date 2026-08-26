@@ -1134,8 +1134,20 @@ export class MessageStreamingHandler {
       // (e.g., all teammates completed between message queue and this handler)
       const sessionStateManager = getSessionStateManager();
       if (!sessionStateManager.isSessionActive(data.sessionId)) {
-        logger.main.info(`[AIService] Ignoring teammate message for ended session ${data.sessionId}`);
-        return;
+        // One window where an inactive session is not an ended one: a handover
+        // parked the live query and forced the session idle so the waiting
+        // prompt could dispatch, and that prompt's startSession() has not run
+        // yet. The provider still owns the subprocess and owes a turn. The
+        // message has already been taken out of the teammate queue by the time
+        // it gets here, so returning discards a finished sub-agent's result
+        // outright. #1269.
+        const hasParkedQuery = typeof (provider as any).hasParkedLeaseForSession === 'function'
+          && (provider as any).hasParkedLeaseForSession(data.sessionId);
+        if (!hasParkedQuery) {
+          logger.main.info(`[AIService] Ignoring teammate message for ended session ${data.sessionId}`);
+          return;
+        }
+        logger.main.info(`[AIService] Teammate message for ${data.sessionId} arrived while its query was parked for a follow-up turn; accepting instead of dropping it`);
       }
       logger.main.info(`[AIService] Teammate message while lead idle, triggering sendMessage for session ${data.sessionId}`);
       try {

@@ -43,7 +43,11 @@ export interface StuckRunningStateDeps {
  * @param hadActiveTurn What the provider's interrupt reported. `undefined`
  *   means the provider can't tell, which is NOT permission to force idle.
  * @param method How the provider interrupted. `'abort'` is the hard fallback:
- *   the turn is gone by definition, so nothing will report its end.
+ *   the turn is gone by definition, so nothing will report its end. `'handover'`
+ *   is the opposite: nothing was interrupted, the live query was passed to the
+ *   follow-up turn — but this turn is over and no terminal transition will ever
+ *   be sent for it, so the queued prompt would strand behind `session-busy`
+ *   (#1269).
  * @returns whether the session was forced idle.
  */
 export async function clearStuckRunningState(
@@ -52,9 +56,13 @@ export async function clearStuckRunningState(
     sessionId,
     hadActiveTurn,
     method,
-  }: { sessionId: string; hadActiveTurn: boolean | undefined; method?: 'interrupt' | 'abort' },
+  }: {
+    sessionId: string;
+    hadActiveTurn: boolean | undefined;
+    method?: 'interrupt' | 'abort' | 'handover';
+  },
 ): Promise<boolean> {
-  if (hadActiveTurn !== false && method !== 'abort') {
+  if (hadActiveTurn !== false && method !== 'abort' && method !== 'handover') {
     return false;
   }
 
@@ -65,7 +73,11 @@ export async function clearStuckRunningState(
 
   deps.logWarn(
     `[AIService] interruptCurrentTurn: session ${sessionId} reports ${liveState.status}${liveState.isStreaming ? '/streaming' : ''} but ${
-      method === 'abort' ? 'the turn was hard-aborted' : 'the provider had no active turn'
+      method === 'abort'
+        ? 'the turn was hard-aborted'
+        : method === 'handover'
+          ? 'its query was handed to the follow-up turn, so no turn is live'
+          : 'the provider had no active turn'
     }; forcing it idle so queued prompts can dispatch`,
   );
   await deps.interruptSession(sessionId);
