@@ -331,13 +331,6 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
      * whether the query was actually parked.
      */
     resolveParked: ((parked: boolean) => void) | null;
-    /**
-     * The park stopped a generation that was still running, so the subprocess
-     * still owes that turn a `result`. Recorded here rather than read off the
-     * SDK: we are the ones who called interrupt(), so no undocumented chunk
-     * field has to be trusted. Travels into the lease. #1269.
-     */
-    interruptedGeneration: boolean;
   } | null = null;
   private parkedLease: {
     query: Query;
@@ -386,12 +379,6 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
      * sub-agents that finished just before the handover. #1269.
      */
     terminalNotifications: TaskTerminalNotification[];
-    /**
-     * The abandoned generation's `result` is still in flight on this query. The
-     * adopting turn would read it as its OWN result and complete before it had
-     * answered, so it discards the first one it sees. #1269.
-     */
-    discardInheritedResult: boolean;
   } | null = null;
   private static readonly HANDOVER_PARK_TIMEOUT_MS = 5000;
   // Expiry for a lease nobody adopts — the follow-up prompt can be swept, raced
@@ -1334,10 +1321,6 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       // then an empty success result (num_turns=0) BEFORE processing the user's
       // prompt. Ending the turn on that result swallows the prompt. NIM-1470.
       let sawTaskNotificationThisTurn = false;
-      // Set only on a turn that adopted a lease whose park stopped a generation
-      // in flight; cleared on the first `result`, so this turn still ends on its
-      // own. See parkedLease.discardInheritedResult. #1269.
-      let discardInheritedResult = adopted?.discardInheritedResult === true;
 
 
       // Stream the response
@@ -1453,15 +1436,6 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
           // can_use_tool requests (the original "Stream closed" trigger)
           // complete on the still-open stdin while still letting the turn
           // finish in a bounded amount of time.
-          // The `result` of the generation the park abandoned, inherited with
-          // the query: it belongs to the turn that is gone and is dropped below.
-          // Decided HERE, before the grace-timer gate rather than beside the
-          // drop, because both need the answer and the flag is consumed by the
-          // first `result` this turn reads. #1269.
-          const inheritedResult = discardInheritedResult
-            && typeof chunk === 'object' && chunk !== null && chunk.type === 'result';
-          if (inheritedResult) discardInheritedResult = false;
-
           if (typeof chunk === 'object' && chunk !== null) {
             // A notification-flush result (num_turns=0, no output, emitted on
             // resume before the real turn runs) is NOT end-of-turn. Arming the
@@ -1474,7 +1448,6 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
               chunk,
               sawTaskNotificationThisTurn,
               sawAssistantOutputThisTurn,
-              inheritedResult,
             );
             if (armsGraceTimer && resultReceivedTime === null) {
               resultReceivedTime = Date.now();
@@ -1912,17 +1885,11 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
           // afterward. Keep the loop (and the control channel) alive; the real
           // result completes the turn, and the post-loop fallback covers the
           // case where it never arrives. See NIM-1470.
-          // `inheritedResult` (decided at the top of the loop body) gets the
-          // same disposal: it belongs to the turn that is gone, and reading it
-          // here would end this one before it answered.
           if (
             typeof chunk === 'object' && chunk !== null && !completeEmitted
-            && (inheritedResult
-              || isNotificationFlushResult(chunk, sawTaskNotificationThisTurn, sawAssistantOutputThisTurn))
+            && isNotificationFlushResult(chunk, sawTaskNotificationThisTurn, sawAssistantOutputThisTurn)
           ) {
-            console.log(inheritedResult
-              ? '[CLAUDE-CODE] SUBAGENT_DRAIN: discarding the abandoned generation\'s result inherited with the parked query'
-              : '[CLAUDE-CODE] Ignoring notification-flush result (num_turns=0, no output) — awaiting the real turn result');
+            console.log('[CLAUDE-CODE] Ignoring notification-flush result (num_turns=0, no output) — awaiting the real turn result');
             continue;
           }
 
@@ -2689,13 +2656,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
     caller: string,
     followUp: TurnHandoverCandidate | null | undefined,
   ): Promise<boolean> {
-    const leadQuery = this.leadQuery;
-    if (!leadQuery) return false;
-    // Two entries, one loss: the drain, where only sub-agents hold the query
-    // open, and a lead that is still generating while they run. An interrupt
-    // destroys the same sub-agents either way. With none running there is
-    // nothing to carry over, and a park would be risk without gain. #1269.
-    if (!this.drainingBackgroundTasks && !this.hasRunningTasks()) return false;
+    if (!this.leadQuery || !this.drainingBackgroundTasks) return false;
     // Only park when the adopting turn is already known to exist and to be
     // adoptable. Parking speculatively meant every case where no adopting turn
     // followed had to be caught afterwards. #1269.
@@ -2705,35 +2666,15 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
     // comes. Let it fall back to a real interrupt instead.
     if (this.handover) return false;
 
-    // Both entries land here, and they differ in what still holds the query: a
-    // drain has only the sub-agents, an interrupted generation also has a lead
-    // mid-answer. Naming the wrong one sends the next reader of this log looking
-    // for a drain that never opened. #1269.
-    const interruptedGeneration = !this.drainingBackgroundTasks;
-    console.log(`[CLAUDE-CODE] ${caller}: ${interruptedGeneration
-      ? 'the lead is still generating and background sub-agents are running'
-      : 'only background sub-agents hold the query open'}; handing the query to the follow-up turn instead of interrupting`);
+    console.log(`[CLAUDE-CODE] ${caller}: only background sub-agents hold the query open; handing it to the follow-up turn instead of interrupting`);
     let settle!: (parked: boolean) => void;
     const parked = new Promise<boolean>(resolve => { settle = resolve; });
-    this.handover = { state: 'requested', resolveParked: settle, interruptedGeneration };
+    this.handover = { state: 'requested', resolveParked: settle };
     // Wake the loop's race so it leaves the drain now instead of waiting for the
     // next chunk — a quiet sub-agent can be silent for minutes.
     if (this.interruptResolve) {
       this.interruptResolve();
       this.interruptResolve = null;
-    }
-    // A drain has no generation left to stop; a still-writing lead does, and
-    // waking the loop alone does not reach it — the subprocess would keep
-    // producing into the parked query and its chunks would surface as the
-    // follow-up turn's. Strictly after the state above: the loop must find
-    // `requested` when it wakes, or it takes the interrupt branch and reaps the
-    // sub-agents this park exists to keep. #1269.
-    if (interruptedGeneration) {
-      try {
-        await leadQuery.interrupt();
-      } catch (err) {
-        console.warn(`[CLAUDE-CODE] ${caller}: interrupt() before the park failed (transport may be closed):`, err);
-      }
     }
     const raced = await Promise.race([
       parked.then(didPark => ({ timedOut: false, didPark })),
@@ -2759,7 +2700,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
     }
 
     console.warn(`[CLAUDE-CODE] ${caller}: handover did not park in time; falling back to interrupt`);
-    if (this.handover) this.handover = { state: 'abandoned', resolveParked: null, interruptedGeneration };
+    if (this.handover) this.handover = { state: 'abandoned', resolveParked: null };
     return false;
   }
 
@@ -2780,11 +2721,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
   private abandonHandoverForInterrupt(caller: string): void {
     if (!this.handover || this.handover.state === 'abandoned') return;
     console.warn(`[CLAUDE-CODE] ${caller}: interrupting while a handover was ${this.handover.state}; abandoning the park so the query's sub-agents are reaped`);
-    this.handover = {
-      state: 'abandoned',
-      resolveParked: this.handover.resolveParked,
-      interruptedGeneration: this.handover.interruptedGeneration,
-    };
+    this.handover = { state: 'abandoned', resolveParked: this.handover.resolveParked };
   }
 
   /** Release the query this provider owns with its abort controller, clearing both slots. */
@@ -2841,7 +2778,6 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
         optionsSignature: parts.optionsSignature ?? '',
         pendingChunk: parts.pendingChunk ?? null,
         terminalNotifications: this.drainTerminalNotifications,
-        discardInheritedResult: this.handover?.interruptedGeneration === true,
       };
       this.armParkedLeaseWatchdog();
       parked = true;
@@ -2878,7 +2814,6 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
     optionsSignature: string;
     pendingChunk: Promise<IteratorResult<any>> | null;
     terminalNotifications: TaskTerminalNotification[];
-    discardInheritedResult: boolean;
   } | null {
     return this.parkedLease;
   }

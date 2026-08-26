@@ -144,22 +144,13 @@ export function isNotificationFlushResult(
  * mid-turn makes every later canUseTool/hook request fail "Stream closed" and
  * leaks the runaway subprocess. Only the REAL result arms the timer. Non-result
  * chunks never arm it. See NIM-1470.
- *
- * `isDiscardedResult` covers the second chunk the loop reads without acting on:
- * the abandoned generation's result inherited with a parked query. Arming on it
- * starts the countdown at the top of the adopting turn, and its expiry ends the
- * prompt stream — killing the background sub-agents the park preserved. The
- * caller decides WHICH chunks it discards; that a discarded chunk cannot arm is
- * decided here, with every other reason not to arm. See #1269.
  */
 export function shouldArmGraceTimerForResult(
   chunk: { type?: string; subtype?: string; is_error?: boolean; num_turns?: number; result?: string },
   sawTaskNotificationThisTurn: boolean,
   sawAssistantOutputThisTurn: boolean,
-  isDiscardedResult = false,
 ): boolean {
   if (chunk.type !== 'result') return false;
-  if (isDiscardedResult) return false;
   return !isNotificationFlushResult(chunk, sawTaskNotificationThisTurn, sawAssistantOutputThisTurn);
 }
 
