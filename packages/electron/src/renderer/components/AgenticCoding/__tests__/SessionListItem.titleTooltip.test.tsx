@@ -25,6 +25,8 @@ vi.mock('../../../store', () => ({
   sessionShareAtom: () => ({}),
   sessionWakeupAtom: () => ({}),
   sessionLastActivityAtom: () => ({}),
+  sessionBackgroundDrainAtom: () => ({}),
+  sessionRunningTaskCountAtom: () => ({}),
 }));
 vi.mock('../../../store/atoms/sessions', () => ({ convertToWorkstreamAtom: () => ({}) }));
 vi.mock('../SessionContextMenu', () => ({ SessionContextMenu: () => null }));

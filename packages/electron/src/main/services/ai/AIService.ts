@@ -212,8 +212,13 @@ function scheduleMobileSettingsSync(): void {
 export interface InterruptCurrentTurnResult {
   success: boolean;
   error?: string;
-  /** How the turn was stopped; absent when `success` is false. */
-  method?: 'interrupt' | 'abort' | 'terminal-ctrl-c';
+  /**
+   * How the turn was stopped; absent when `success` is false. `'handover'` is
+   * the turn ending without its query being closed — it was parked as a lease
+   * for the follow-up turn, so the background sub-agents inside it keep
+   * running. #1269.
+   */
+  method?: 'interrupt' | 'abort' | 'terminal-ctrl-c' | 'handover';
   /** True when the session was forced idle because no completion event could arrive. */
   forcedIdle?: boolean;
 }
@@ -604,6 +609,7 @@ export class AIService {
       {
         getSessionState: (id) => stateManager.getSessionState(id),
         interruptSession: (id) => stateManager.interruptSession(id),
+        releaseTurn: (id) => stateManager.releaseTurnForHandover(id),
         logWarn: (message) => logger.main.warn(message),
       },
       { sessionId, hadActiveTurn: result.hadActiveTurn, method: result.method },

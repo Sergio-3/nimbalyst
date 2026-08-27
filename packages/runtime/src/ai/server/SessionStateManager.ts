@@ -263,6 +263,43 @@ export class SessionStateManager extends EventEmitter {
   }
 
   /**
+   * End a session's TURN without saying the session has stopped working.
+   *
+   * A send-now during a background sub-agent drain hands the live query to the
+   * follow-up turn: this turn is over, but the sub-agents inside that query keep
+   * running (#1269). Both statements used to travel as one call to
+   * `interruptSession()` -- and only the first one is true here:
+   *
+   *  - "no turn is live, so the queue may dispatch": needed, and what the status
+   *    and streaming flags below say. `getRunningSessionIds()` and the drive's
+   *    busy gate read exactly those, and the terminal event is the wake a
+   *    deferred prompt is waiting on.
+   *  - "this session has stopped working": false. Interrupting also evicted the
+   *    session from the live map, so the adopting turn's activity updates
+   *    arrived for a session this manager no longer knew.
+   *
+   * What the UI shows during the released window is the provider's business: it
+   * publishes the running background work in session metadata.
+   */
+  async releaseTurnForHandover(sessionId: string): Promise<void> {
+    const state = this.activeSessions.get(sessionId);
+    if (state) {
+      state.status = 'idle';
+      state.isStreaming = false;
+      state.lastActivity = new Date();
+    }
+
+    await this.updateDatabase(sessionId, 'idle');
+
+    this.emitEvent({
+      type: 'session:interrupted',
+      sessionId,
+      workspacePath: state?.workspacePath,
+      timestamp: new Date(),
+    });
+  }
+
+  /**
    * Get the IDs of every session this manager is currently TRACKING — i.e. bare
    * `activeSessions` map membership. This is NOT the same as "currently running":
    * a `claude-code-cli` session is deliberately retained in the map after its

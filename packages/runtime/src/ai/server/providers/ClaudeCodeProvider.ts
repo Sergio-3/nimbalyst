@@ -2445,8 +2445,16 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
           wasInterrupted: interruptedThisTurn,
         },
       );
-      this.drainingBackgroundTasks = false;
-      void this.emitBackgroundDrainUpdate(sessionId);
+      // A parked query keeps its sub-agents running: only this TURN ended, the
+      // drain did not. Publishing `false` here withdrew the one signal the
+      // renderer has for a session working without a turn of its own, so the
+      // session read as idle for the whole handover window. The adopting turn
+      // resets the flag for itself; disposeParkedLease() withdraws it when no
+      // turn ever adopts.
+      if (!parkedThisTurn) {
+        this.drainingBackgroundTasks = false;
+        void this.emitBackgroundDrainUpdate(sessionId);
+      }
       this.drainExitCause = 'resolved';
       this.drainTerminalNotifications = [];
       this.drainGraceExpired = false;
@@ -2928,6 +2936,13 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
 
     console.warn(`[CLAUDE-CODE] SUBAGENT_DRAIN: disposing parked query (${reason}); its background sub-agents go with it`);
     this.tearDownOwnedQuery(lease, `parked query disposed (${reason})`);
+
+    // The park left the drain flag standing so the session kept reporting the
+    // sub-agents it was still running. They just died with the query, so
+    // withdraw the claim here — otherwise the row keeps the indicator until
+    // some later turn happens to reset it.
+    this.drainingBackgroundTasks = false;
+    void this.emitBackgroundDrainUpdate(lease.sessionId);
 
     // The park had skipped finalizeBackgroundDrain, so this is the last exit and
     // nobody else announces it; consumers waiting on the deferred session end

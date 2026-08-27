@@ -48,6 +48,23 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: (args: unknown) => sdkQuery(args),
 }));
 
+/**
+ * Every `backgroundDrain` value the provider published to session metadata, in
+ * order. That flag is the renderer's only signal that a session is working with
+ * no turn of its own — the send-now button and the session row both read it.
+ */
+const published = vi.hoisted(() => ({ drain: [] as boolean[] }));
+vi.mock('../../../../storage/repositories/AISessionsRepository', () => ({
+  AISessionsRepository: {
+    get: async () => ({ metadata: {} }),
+    updateMetadata: async (_sessionId: string, patch: { metadata?: { backgroundDrain?: unknown } }) => {
+      if (typeof patch.metadata?.backgroundDrain === 'boolean') {
+        published.drain.push(patch.metadata.backgroundDrain);
+      }
+    },
+  },
+}));
+
 import { ClaudeCodeProvider } from '../ClaudeCodeProvider';
 import type { StreamChunk } from '../../types';
 
@@ -437,5 +454,37 @@ describe('ClaudeCodeProvider send-now during a sub-agent drain', () => {
     cli[0].emit({ type: 'system', subtype: 'task_notification', task_id: 'sweep', status: 'completed', summary: 'swept' });
     await turnB.done;
     fs.rmSync(dir, { recursive: true, force: true });
+  }, 20_000);
+
+  // The parked turn's teardown published `backgroundDrain: false` — the turn was
+  // over, so the per-turn flag was reset and mirrored out. But the sub-agents it
+  // was reporting keep running inside the parked query, and that claim was the
+  // renderer's only reason to show anything at all. Between the handover and the
+  // adopting turn the session read as having nothing to do. #1269.
+  it('keeps reporting background work while the handed-over query is parked', async () => {
+    published.drain.length = 0;
+    const cli = fakeCliFleet();
+    const provider = new ClaudeCodeProvider();
+    const state = internals(provider);
+
+    const turnA = await runToDrain(provider, () => cli[0]);
+    await waitFor(() => published.drain.at(-1) === true, 'the drain to be published');
+
+    await expect(provider.interruptCurrentTurn({ canAdoptQuery: true }))
+      .resolves.toEqual({ method: 'handover' });
+    await turnA.done;
+
+    expect(state.parkedLease).not.toBeNull();
+    expect(state.activeTasks.get('sweep')?.status).toBe('running');
+    // The teardown publishes fire-and-forget, so a withdrawal would land after
+    // the turn's own promise. Settle before reading, or the assertion passes on
+    // a write that has merely not happened yet.
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(published.drain.at(-1)).toBe(true);
+
+    // And the claim is withdrawn when the lease dies with nobody to adopt it,
+    // so a session that really has stopped does not keep the indicator.
+    provider.abort();
+    await waitFor(() => published.drain.at(-1) === false, 'the disposal to withdraw it');
   }, 20_000);
 });

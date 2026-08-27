@@ -24,6 +24,13 @@
  * A graceful `interrupt` is the case that must NOT be forced: that turn is
  * still winding down and will emit its own terminal transition.
  *
+ * A `handover` is freed a third way. The other two really did end the session's
+ * work; a handover only ended its TURN, and the query it passed on still has
+ * background sub-agents running in it. Ending the session there made a claim
+ * nobody could see was wrong: the row lost its indicator and the session left
+ * the live map while the work went on. So it releases the turn instead --
+ * same freed queue, no claim about the session.
+ *
  * Pure module (state manager injected) so the decision is testable without a
  * main process.
  */
@@ -35,7 +42,10 @@ interface LiveSessionState {
 
 export interface StuckRunningStateDeps {
   getSessionState(sessionId: string): LiveSessionState | null;
+  /** The session's work is over: forget it and report a finished turn. */
   interruptSession(sessionId: string): Promise<void>;
+  /** Only the turn is over: free the queue, keep the session tracked. */
+  releaseTurn(sessionId: string): Promise<void>;
   logWarn(message: string): void;
 }
 
@@ -78,8 +88,12 @@ export async function clearStuckRunningState(
         : method === 'handover'
           ? 'its query was handed to the follow-up turn, so no turn is live'
           : 'the provider had no active turn'
-    }; forcing it idle so queued prompts can dispatch`,
+    }; ${method === 'handover' ? 'releasing the turn' : 'forcing it idle'} so queued prompts can dispatch`,
   );
-  await deps.interruptSession(sessionId);
+  if (method === 'handover') {
+    await deps.releaseTurn(sessionId);
+  } else {
+    await deps.interruptSession(sessionId);
+  }
   return true;
 }
