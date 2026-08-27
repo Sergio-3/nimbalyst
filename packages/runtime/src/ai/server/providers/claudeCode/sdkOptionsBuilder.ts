@@ -109,6 +109,14 @@ export interface BuildSdkOptionsResult {
   options: ClaudeAgentSdkOptions;
   promptInput: AsyncIterable<SDKUserMessage>;
   promptController: PromptStreamController;
+  /**
+   * The content of the turn's first user message — a bare string, or the
+   * attachment blocks followed by the text. Handed back so a turn that adopts
+   * a parked query pushes the SAME content onto that query's stream instead of
+   * rebuilding it, which is what kept attachments out of the handover while
+   * two places disagreed about where they live. #1269.
+   */
+  initialUserContent: string | ContentBlockParam[];
   helperMethod: 'native' | 'custom';
 }
 
@@ -700,5 +708,5 @@ export async function buildSdkOptions(
   const { iterable: promptInput, controller: promptController } =
     createPersistentPromptStream(initialMessage);
 
-  return { options, promptInput, promptController, helperMethod };
+  return { options, promptInput, promptController, initialUserContent: userContent, helperMethod };
 }

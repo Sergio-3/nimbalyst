@@ -6,6 +6,7 @@
  */
 
 import { query, type SDKUserMessage, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { ContentBlockParam } from '@anthropic-ai/sdk/resources';
 
 // Query interface not properly exported by SDK, so we define it inline
 interface Query extends AsyncGenerator<SDKMessage, void> {
@@ -104,8 +105,14 @@ export interface PackagedBuildOptions {
  * one-shot stream for `streamInput()`, and the handover adoption, which pushes
  * it onto the live prompt stream — so an injected turn is built in exactly one
  * place. #1269.
+ *
+ * `content` takes blocks as well as text: attachments ride in the message, not
+ * in the options the process was started with, so an injected turn can carry
+ * them exactly like a turn that opens its own query (measured against the
+ * pinned SDK: a second message with image blocks on an open prompt stream is
+ * accepted and answered from the image). #1269.
  */
-export function buildInjectedUserMessage(content: string): SDKUserMessage {
+export function buildInjectedUserMessage(content: string | ContentBlockParam[]): SDKUserMessage {
   return {
     type: 'user',
     message: {

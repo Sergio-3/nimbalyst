@@ -25,7 +25,7 @@ interface PromptQueueListProps {
 }
 
 /** What a send-now click does to work that is currently running. */
-export type SendNowOutcome = 'safe' | 'interrupt' | 'interrupt-attachments';
+export type SendNowOutcome = 'safe' | 'interrupt';
 
 /**
  * Decide whether a send-now click destroys running work.
@@ -38,30 +38,22 @@ export type SendNowOutcome = 'safe' | 'interrupt' | 'interrupt-attachments';
  * them to stop reading the warning.
  *
  * With tasks running, the query has to be *handed over* rather than interrupted
- * to keep them — which needs the same two facts the main process checks in
+ * to keep them — which needs the one fact the main process checks in
  * ClaudeCodeProvider.requestQueryHandover: the lead turn is already done
- * (`backgroundDrainActive`) AND the waiting prompt can run on the open query,
- * which attachments rule out.
- *
- * The decision reads the HEAD of the queue, not the row that was clicked: the
- * button interrupts the turn and the main process then dispatches whatever is
- * first in line, so every row's click has the same consequence. #1269.
+ * (`backgroundDrainActive`). What the waiting prompt carries does not matter;
+ * attachments ride in the message and go over the same handover. #1269.
  */
 export function sendNowOutcome(
   backgroundDrainActive: boolean,
-  head: QueuedPrompt | undefined,
   hasRunningTasks: boolean,
 ): SendNowOutcome {
   if (!hasRunningTasks) return 'safe';
-  const headHasAttachments = !!head?.attachments && head.attachments.length > 0;
-  if (!backgroundDrainActive) return 'interrupt';
-  return headHasAttachments ? 'interrupt-attachments' : 'safe';
+  return backgroundDrainActive ? 'safe' : 'interrupt';
 }
 
 const SEND_NOW_TITLES: Record<SendNowOutcome, string> = {
   safe: 'Sends now by interrupting the agent — that ends the current answer and nothing else: no delegated task is stopped by it.',
   interrupt: 'Sends now by interrupting the agent while it is still working — thinking and tool calls count, not just visible output — which also stops every delegated task still running.',
-  'interrupt-attachments': 'Sends now by interrupting the agent, because the next queued prompt has attachments and needs a turn of its own — every delegated task still running is stopped with it.',
 };
 
 function AttachmentIndicator({ attachments }: { attachments: QueuedPromptAttachment[] }) {
@@ -103,8 +95,10 @@ export function PromptQueueList({ queue, onCancel, onEdit, onSendNow, background
     return null;
   }
 
-  // Same for every row -- see sendNowOutcome().
-  const outcome = sendNowOutcome(backgroundDrainActive, queue[0], hasRunningTasks);
+  // Same for every row: the button interrupts the turn and the main process
+  // then dispatches whatever is first in line, so every row's click has the
+  // same consequence.
+  const outcome = sendNowOutcome(backgroundDrainActive, hasRunningTasks);
   const sendNowIsSafe = outcome === 'safe';
 
   return (

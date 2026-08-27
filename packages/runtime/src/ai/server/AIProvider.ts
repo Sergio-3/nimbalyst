@@ -126,9 +126,13 @@ export function readProviderWorkflowCatalog(
  * Passed in rather than discovered by the provider, because the interrupt
  * handler is what holds the prompt queue. Omitted or `null` means "no follow-up
  * known", which is never a reason to hand a live query over. `canAdoptQuery`
- * says the waiting prompt can run on the query that is already open; it is false
- * when the prompt carries attachments, because content blocks belong to the
- * options the running process was started with. #1269.
+ * says the waiting prompt can run on the query that is already open.
+ *
+ * Attachments are not a reason to say false: they travel in the message, not in
+ * the options the process was started with, and the pinned SDK accepts a second
+ * message carrying image blocks on an open prompt stream. No caller currently
+ * has a reason to pass false — the remaining bar to adoption is the query's own
+ * options signature, which the provider checks for itself. #1269.
  */
 export interface TurnHandoverCandidate {
   canAdoptQuery: boolean;

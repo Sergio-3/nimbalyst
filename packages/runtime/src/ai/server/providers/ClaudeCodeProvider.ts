@@ -50,6 +50,7 @@ import {
   CLAUDE_CODE_SAFE_FALLBACK_MODEL,
   baseContextWindowForVariant,
 } from '../../modelConstants';
+import type { ContentBlockParam } from '@anthropic-ai/sdk/resources';
 import type { InterruptTurnResult, TurnHandoverCandidate } from '../AIProvider';
 import { isBedrockToolSearchError } from '../utils/errorDetection';
 import { AgentMessagesRepository } from '../../../storage/repositories/AgentMessagesRepository';
@@ -1128,17 +1129,19 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
 
       // Adopt a query parked by a previous turn's handover: the SAME subprocess,
       // so the background sub-agents still running inside it survive this turn
-      // and their task_notifications land in this generator. Content blocks
-      // belong to the options the live process was started with, so a prompt
-      // carrying them cannot adopt. #1269.
+      // and their task_notifications land in this generator. Attachments are no
+      // obstacle — they ride in the message, not in the options the process was
+      // started with, which is why the adopting turn pushes the very content
+      // its own first message would have carried. #1269.
       //
-      // Three behaviours of @anthropic-ai/claude-agent-sdk are load-bearing
+      // Four behaviours of @anthropic-ai/claude-agent-sdk are load-bearing
       // here, and none is a documented contract. The dependency is pinned
       // exactly to 0.3.241 in the root, `runtime` and `electron` package.json,
-      // so a version bump is visible in review — re-verify all three then:
+      // so a version bump is visible in review — re-verify all four then:
       //   1. A message written to a live query's prompt stream starts a new
       //      user turn on it, rather than being rejected because the previous
-      //      turn already produced its `result`.
+      //      turn already produced its `result` — including one whose content is
+      //      image or document blocks rather than text.
       //   2. The AbortController handed to `query({ options })` governs that
       //      query's lifetime, so whoever holds it can stop the subprocess.
       //      Everything the lease does with ownership rests on this.
@@ -1153,11 +1156,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       //      the adoption looks final while the message never left the process.
       //      Deliberately not guarded: never observed, and the one signal that
       //      would show it, `Query.isClosed()`, is absent from the exported type.
-      const canAdopt = imageContentBlocks.length === 0 && documentContentBlocks.length === 0;
-      if (!canAdopt) {
-        this.disposeParkedLease('follow-up prompt carries attachments', false);
-      }
-      const adopted = canAdopt ? this.adoptParkedLeaseFor(message, queryOptionsSignature) : null;
+      const adopted = this.adoptParkedLeaseFor(sdkResult.initialUserContent, queryOptionsSignature);
       if (adopted) {
         console.log('[CLAUDE-CODE] SUBAGENT_DRAIN: adopting parked query for follow-up turn; background sub-agents preserved');
         promptController.end('handover-unused');
@@ -2857,7 +2856,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
    * own query, prompt stream and abort controller are all still untouched. #1269.
    */
   private adoptParkedLeaseFor(
-    message: string,
+    content: string | ContentBlockParam[],
     optionsSignature: string,
   ): ReturnType<ClaudeCodeProvider['takeParkedLease']> {
     const candidate = this.takeParkedLease();
@@ -2869,7 +2868,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       return null;
     }
 
-    if (!candidate.promptController.push(buildInjectedUserMessage(message))) {
+    if (!candidate.promptController.push(buildInjectedUserMessage(content))) {
       console.warn('[CLAUDE-CODE] SUBAGENT_DRAIN: the parked prompt stream was closed before the follow-up prompt could be delivered; disposing the lease and opening a fresh query so the message still arrives');
       this.disposeParkedLease('prompt stream closed before adoption', false);
       return null;

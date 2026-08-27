@@ -569,10 +569,10 @@ export class AIService {
     this.sessionsProcessingQueue.delete(sessionId);
     // Read AFTER the sweep, so it describes the queue the follow-up turn will
     // actually be dispatched from. A provider that can hand its live query to
-    // that turn (#1269) may only do so when one is really waiting and can run
-    // on the open query — a prompt with attachments needs its own, because
-    // content blocks belong to the options the running process was started
-    // with. Left null on any failure: not handing over is always safe.
+    // that turn (#1269) may only do so when one is really waiting; attachments
+    // are no obstacle, since they ride in the message rather than in the
+    // options the running process was started with. Left null on any failure:
+    // not handing over is always safe.
     let followUp: TurnHandoverCandidate | null = null;
     try {
       const { getQueuedPromptsStore } = await import('../RepositoryManager');
@@ -586,7 +586,7 @@ export class AIService {
       }
       const nextPending = (await queueStore.listPending(sessionId))[0];
       if (nextPending) {
-        followUp = { canAdoptQuery: !(nextPending.attachments?.length) };
+        followUp = { canAdoptQuery: true };
       }
     } catch (sweepErr) {
       logger.main.error('[AIService] interruptCurrentTurn: sweepExecutingForSession failed:', sweepErr);

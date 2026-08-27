@@ -59,6 +59,8 @@ import type { StreamChunk } from '../../types';
  */
 function spawnFakeCli(prompt: AsyncIterable<any>, abortController?: AbortController) {
   const promptsDelivered: string[] = [];
+  /** The same messages unflattened, so a turn's attachment blocks stay readable. */
+  const contentsDelivered: unknown[] = [];
   const seen = { stdinClosed: false, interrupts: 0, closes: 0, aborted: false };
 
   const outbox: any[] = [];
@@ -88,6 +90,7 @@ function spawnFakeCli(prompt: AsyncIterable<any>, abortController?: AbortControl
   void (async () => {
     for await (const message of prompt) {
       promptsDelivered.push(String(message?.message?.content ?? ''));
+      contentsDelivered.push(message?.message?.content);
       nudge();
     }
     seen.stdinClosed = true;
@@ -119,6 +122,7 @@ function spawnFakeCli(prompt: AsyncIterable<any>, abortController?: AbortControl
     query,
     seen,
     promptsDelivered,
+    contentsDelivered,
     emit: (chunk: any) => { outbox.push(chunk); nudge(); },
   };
 }
@@ -152,10 +156,10 @@ type Turn = {
   resumeAtComplete?: boolean;
 };
 
-function startTurn(provider: ClaudeCodeProvider, message: string): Turn {
+function startTurn(provider: ClaudeCodeProvider, message: string, attachments: any[] = []): Turn {
   const turn: Turn = { chunks: [], done: Promise.resolve() };
   turn.done = (async () => {
-    for await (const chunk of provider.sendMessage(message, undefined, 'session-1', [], process.cwd())) {
+    for await (const chunk of provider.sendMessage(message, undefined, 'session-1', [], process.cwd(), attachments)) {
       turn.chunks.push(chunk);
       if (chunk.type === 'complete') turn.resumeAtComplete = provider.willResumeAfterCompletion();
     }
@@ -376,6 +380,60 @@ describe('ClaudeCodeProvider send-now during a sub-agent drain', () => {
     // mean the adopting turn carried the parked turn's files into its snapshot.
     expect(history.snapshots).toEqual([beforeHandover, afterHandover]);
 
+    cli[0].emit({ type: 'system', subtype: 'task_notification', task_id: 'sweep', status: 'completed', summary: 'swept' });
+    await turnB.done;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }, 20_000);
+
+  // A follow-up prompt with an attachment used to be barred from adoption, on
+  // the reasoning that content blocks belong to the options the process was
+  // started with. They don't — they ride in the message, and the pinned SDK
+  // takes a second one carrying image blocks on an open prompt stream. So the
+  // attachment turn keeps the sub-agent like any other.
+  //
+  // The delivered content is asserted alongside the adoption because dropping
+  // it is silent: pushing the bare text would still adopt, still preserve the
+  // sub-agent, and answer a question about a picture the model never got. #1269.
+  it('adopts the parked query for a follow-up carrying an image, and delivers the image with it', async () => {
+    const cli = fakeCliFleet();
+    const provider = new ClaudeCodeProvider();
+    const state = internals(provider);
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nim-1269-attach-'));
+    const screenshot = path.join(dir, 'screenshot.png');
+    const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+    fs.writeFileSync(screenshot, Buffer.from(pngBase64, 'base64'));
+
+    const turnA = await runToDrain(provider, () => cli[0]);
+    await expect(provider.interruptCurrentTurn({ canAdoptQuery: true }))
+      .resolves.toEqual({ method: 'handover' });
+    await turnA.done;
+
+    const turnB = startTurn(provider, 'what is in this screenshot?', [
+      { type: 'image', filepath: screenshot, mimeType: 'image/png' },
+    ]);
+    // Either outcome settles the wait, so a refused adoption fails on the
+    // assertion below rather than on a timeout that names nothing.
+    await waitFor(
+      () => cli[0].promptsDelivered.length === 2 || cli.length === 2,
+      'the follow-up prompt to be dispatched',
+    );
+
+    // The adoption itself: one subprocess, one pipe, the sub-agent still in it.
+    expect({
+      queriesSpawned: cli.length,
+      stdinClosed: cli[0].seen.stdinClosed,
+      subAgent: state.activeTasks.get('sweep')?.status,
+    }).toEqual({ queriesSpawned: 1, stdinClosed: false, subAgent: 'running' });
+
+    // What actually went down the pipe: the image, then the question.
+    expect(cli[0].contentsDelivered[1]).toEqual([
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
+      { type: 'text', text: 'what is in this screenshot?' },
+    ]);
+
+    cli[0].emit({ type: 'result', subtype: 'success', result: 'a single pixel', usage: {} });
+    await waitFor(() => state.drainingBackgroundTasks, 'the adopted turn to enter its own drain');
     cli[0].emit({ type: 'system', subtype: 'task_notification', task_id: 'sweep', status: 'completed', summary: 'swept' });
     await turnB.done;
     fs.rmSync(dir, { recursive: true, force: true });
