@@ -2396,6 +2396,9 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
         this.takeOwnedQueryParts();
       ClaudeCodeProvider.streamingInstances.delete(this);
       this.abortController = null;
+      // Captured before the reset below: the reap decision a few lines down
+      // needs to know this turn was interrupted, and by then the field is gone.
+      const interruptedThisTurn = this.wasInterrupted;
       this.wasInterrupted = false;
       this.interruptResolve = null;
       // End the persistent prompt stream so the SDK's streamInput generator
@@ -2440,6 +2443,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
           adoptedLease: adoptedThisTurn,
           parkedForHandover: parkedThisTurn,
           wasDraining: this.drainingBackgroundTasks,
+          wasInterrupted: interruptedThisTurn,
         },
       );
       this.drainingBackgroundTasks = false;
@@ -2967,16 +2971,24 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       abortController: AbortController | null;
       sessionId: string | undefined;
     },
-    // `wasDraining` is passed in, not read from `this`: the finally resets
-    // drainingBackgroundTasks a few lines below this call, so reading it here
-    // would make correctness depend on that ordering. #1269.
-    turn: { adoptedLease: boolean; parkedForHandover: boolean; wasDraining: boolean },
+    // `wasDraining` and `wasInterrupted` are passed in, not read from `this`:
+    // the finally resets both around this call, so reading them here would make
+    // correctness depend on that ordering. #1269.
+    turn: {
+      adoptedLease: boolean;
+      parkedForHandover: boolean;
+      wasDraining: boolean;
+      wasInterrupted: boolean;
+    },
   ): void {
     const reap = shouldReapAdoptedTasks({
       adoptedLease: turn.adoptedLease,
       parkedForHandover: turn.parkedForHandover,
       wasDraining: turn.wasDraining,
       ownsQuery: !!parts.query,
+      // The interrupt leaves no owner for this query, and it has already
+      // stopped the tasks that would otherwise ask for the teardown. #1269.
+      wasInterrupted: turn.wasInterrupted,
       // With nothing left running there is nothing to reap, and the query is
       // healthy: tearing it down would cold-start the subprocess after every
       // handover turn. #1269.

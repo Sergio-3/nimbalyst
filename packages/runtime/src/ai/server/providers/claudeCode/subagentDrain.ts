@@ -415,6 +415,12 @@ export function shouldReapAdoptedTasks(params: {
    * sub-agents.
    */
   ownsQuery: boolean;
+  /**
+   * The interrupt reaps the running tasks itself, so `hasRunningTasks` is
+   * already false when this runs — without this the query has no owner left and
+   * is never closed, and its subprocess outlives the turn that was using it.
+   */
+  wasInterrupted: boolean;
   /** With none, teardown would close a healthy query for nothing. */
   hasRunningTasks: boolean;
 }): boolean {
@@ -422,7 +428,7 @@ export function shouldReapAdoptedTasks(params: {
     && params.adoptedLease
     && !params.parkedForHandover
     && !params.wasDraining
-    && params.hasRunningTasks;
+    && (params.wasInterrupted || params.hasRunningTasks);
 }
 
 export interface DrainOutcome {

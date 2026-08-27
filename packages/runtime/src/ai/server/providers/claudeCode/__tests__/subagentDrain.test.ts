@@ -419,6 +419,7 @@ describe('shouldReapAdoptedTasks', () => {
     parkedForHandover: false,
     wasDraining: false,
     ownsQuery: true,
+    wasInterrupted: false,
     hasRunningTasks: true,
   } satisfies Parameters<typeof shouldReapAdoptedTasks>[0];
 
@@ -451,8 +452,14 @@ describe('shouldReapAdoptedTasks', () => {
   // With nothing running there is nothing to reap, and the teardown this gates
   // aborts and closes the query — a healthy one, whose subprocess the next turn
   // would then have to start cold. #1269.
+  //
+  // Unless the turn was interrupted: that query is not healthy and has no owner
+  // left, and the interrupt has already stopped the very tasks whose absence
+  // would otherwise wave the teardown off — so its subprocess was never closed.
   it('leaves a healthy query alone when an adopted turn ends with no tasks running', () => {
     expect(shouldReapAdoptedTasks({ ...reapable, hasRunningTasks: false })).toBe(false);
+    expect(shouldReapAdoptedTasks({ ...reapable, hasRunningTasks: false, wasInterrupted: true }))
+      .toBe(true);
   });
 });
 

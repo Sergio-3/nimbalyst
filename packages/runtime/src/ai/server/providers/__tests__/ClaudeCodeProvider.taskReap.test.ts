@@ -86,7 +86,12 @@ type ProviderInternals = {
       abortController: AbortController | null;
       sessionId: string | undefined;
     },
-    turn: { adoptedLease: boolean; parkedForHandover: boolean; wasDraining: boolean },
+    turn: {
+      adoptedLease: boolean;
+      parkedForHandover: boolean;
+      wasDraining: boolean;
+      wasInterrupted: boolean;
+    },
   ) => void;
   adoptParkedLeaseFor: (message: string, optionsSignature: string) => FakeLease | null;
   releaseAdoptedLease: () => void;
@@ -204,6 +209,9 @@ function runTeardown(
       adoptedLease: turn?.adoptedLease === true,
       parkedForHandover: parked,
       wasDraining: state.drainingBackgroundTasks,
+      // Read here for the same reason the `finally` reads it before its own
+      // reset: an interrupted query has no owner left to close it later.
+      wasInterrupted: state.wasInterrupted,
     },
   );
   return parked;
