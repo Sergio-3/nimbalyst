@@ -5,7 +5,8 @@
  * The canonical transcript system projects TranscriptViewMessages directly
  * without converting back to legacy Message format. These tests ensure
  * that user and assistant message bubbles are visible, contain text,
- * and appear in the correct order (user above, assistant below).
+ * and appear in the correct order (user above, assistant below), and that
+ * the copy button on a rendered code block reaches the native clipboard.
  */
 
 import { test, expect } from '@playwright/test';
@@ -110,6 +111,71 @@ test('user and assistant chat bubbles render with correct content and order', as
   await expect(userBubble.first()).toContainText('What is the capital of France?');
   await expect(assistantBubble.first()).toBeVisible();
   await expect(assistantBubble.first()).toContainText('The capital of France is Paris.');
+});
+
+/**
+ * The unit tests around the copy button stub the clipboard bridge, so the one
+ * thing they cannot answer is whether a click reaches Electron's clipboard at
+ * all -- `navigator.clipboard` resolves in Electron without writing anything,
+ * which is why `copyToClipboard` prefers the IPC route. This exercises that
+ * route against a real window and reads the result back from the main process.
+ *
+ * It also covers the currency escape: the transcript escapes `$1 ... $2` pairs
+ * before parsing, code fences included, so the clipboard must carry the shell
+ * command the author wrote rather than the backslashes the escape inserted.
+ *
+ * Note this writes to the machine's real clipboard.
+ */
+test('code block copy button writes the code to the native clipboard', async () => {
+  const sessionId = await createTestSession(page, workspacePath, {
+    title: 'Code Copy Test',
+  });
+
+  const multiLineCode = "awk '{print $1, $2}' input.txt\necho done";
+  const singleLineCode = 'npm run build';
+
+  await insertAssistantText(page, sessionId, [
+    'Here is the script:',
+    '',
+    '```bash',
+    multiLineCode,
+    '```',
+    '',
+    'And the build step:',
+    '',
+    '```bash',
+    singleLineCode,
+    '```',
+  ].join('\n'));
+
+  await page.waitForTimeout(1000);
+
+  const sessionItem = page.locator(`#session-list-item-${sessionId}`);
+  await expect(sessionItem).toBeVisible({ timeout: TEST_TIMEOUTS.SIDEBAR_LOAD });
+  await sessionItem.click();
+  await page.waitForTimeout(1000);
+
+  const assistantMessage = page.locator('.rich-transcript-message.assistant');
+  await expect(assistantMessage).toBeVisible({ timeout: TEST_TIMEOUTS.SIDEBAR_LOAD });
+
+  const readClipboard = () => electronApp.evaluate(({ clipboard }) => clipboard.readText());
+  // Overwriting first is the point: without it a clipboard left over from
+  // anything else on the machine could pass for a successful copy.
+  const seedClipboard = (text: string) =>
+    electronApp.evaluate(({ clipboard }, value) => clipboard.writeText(value), text);
+
+  await seedClipboard('clipboard-not-written');
+  await assistantMessage.locator('.overflow-wrapper .code-copy-button').click();
+  await expect
+    .poll(readClipboard, { timeout: TEST_TIMEOUTS.SAVE_OPERATION })
+    .toBe(multiLineCode);
+
+  // Single-line blocks render through a different wrapper.
+  await seedClipboard('clipboard-not-written');
+  await assistantMessage.locator('.code-block-compact .code-copy-button').click();
+  await expect
+    .poll(readClipboard, { timeout: TEST_TIMEOUTS.SAVE_OPERATION })
+    .toBe(singleLineCode);
 });
 
 test('optimistic user message persists after debounced reload', async () => {

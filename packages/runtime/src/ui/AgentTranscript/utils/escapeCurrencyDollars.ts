@@ -31,10 +31,42 @@
 const CURRENCY_PAIR_RE = /(?<!\\)\$([^$\n]*?)(?<!\\)\$(?=\d)/g;
 
 export function escapeCurrencyDollars(source: string): string {
+  return escapeCurrencyDollarsWithMap(source).text;
+}
+
+export interface EscapedSource {
+  text: string;
+  /**
+   * Ascending offsets **in `text`** at which a backslash was inserted. The
+   * escape runs over the whole message, code fences included, so a `$1` in a
+   * shell snippet is escaped just like a price. Anything that wants the source
+   * the author actually wrote — the code-block copy button — needs to know
+   * which backslashes are ours, and a plain `\$` cannot be told apart from one
+   * the author typed (the pattern skips already-escaped dollars).
+   */
+  insertions: number[];
+}
+
+export function escapeCurrencyDollarsWithMap(source: string): EscapedSource {
   if (!source) {
-    return source;
+    return { text: source, insertions: [] };
   }
-  return source.replace(CURRENCY_PAIR_RE, (_match, content: string) => {
-    return `\\$${content}\\$`;
-  });
+
+  const insertions: number[] = [];
+  let text = '';
+  let consumed = 0;
+
+  CURRENCY_PAIR_RE.lastIndex = 0;
+  let match: RegExpExecArray | null = CURRENCY_PAIR_RE.exec(source);
+  while (match !== null) {
+    text += source.slice(consumed, match.index);
+    insertions.push(text.length);
+    text += `\\$${match[1]}`;
+    insertions.push(text.length);
+    text += '\\$';
+    consumed = match.index + match[0].length;
+    match = CURRENCY_PAIR_RE.exec(source);
+  }
+
+  return { text: text + source.slice(consumed), insertions };
 }

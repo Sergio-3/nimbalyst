@@ -8,7 +8,8 @@ import {
   useTranscriptMarkdownStyles,
 } from '../contributions';
 import { useAtomValue } from 'jotai';
-import { escapeCurrencyDollars } from '../utils/escapeCurrencyDollars';
+import { escapeCurrencyDollarsWithMap } from '../utils/escapeCurrencyDollars';
+import { copyToClipboard } from '../../../utils/clipboard';
 import { rehypeAutolinkFilePaths } from '../markdown/rehypeAutolinkFilePaths';
 import { rehypeAutolinkTrackerRefs } from '../markdown/rehypeAutolinkTrackerRefs';
 import { rehypeAutolinkSessionRefs } from '../markdown/rehypeAutolinkSessionRefs';
@@ -165,22 +166,224 @@ function setWrapPreference(key: string, value: boolean) {
   wrapPreferenceByKey.set(key, value);
 }
 
+let _rendererInstanceCounter = 0;
+function nextRendererInstanceId(): string {
+  _rendererInstanceCounter += 1;
+  return `mr${_rendererInstanceCounter}`;
+}
+
 let _wrapFallbackCounter = 0;
 function nextFallbackKey(): string {
   _wrapFallbackCounter += 1;
   return `cb:fallback:${_wrapFallbackCounter}`;
 }
 
-// Wrapper for any element that might overflow horizontally.
-// Uses IntersectionObserver to defer scrollWidth measurement until visible,
-// and ResizeObserver to re-check on size changes - avoids forced reflow during
-// initial session load when many code blocks render off-screen.
+// The "Copied" confirmation faces the same remount problem as the wrap
+// preference above: a mid-stream remount would drop it and the user would see
+// the copy silently un-confirm itself. It is keyed the same way *where there is
+// a message id*, and differently where there is not — see `codeBlockCopyKey`.
+// Tool results and sub-agent prompts render without one and are re-rendered by
+// every streaming chunk, so the wrap preference's per-mount fallback would lose
+// the confirmation immediately.
+//
+// Only one entry is ever held. The clipboard has room for one thing, so a second
+// copy must retire the first confirmation — otherwise two blocks claim to be on
+// the clipboard and only the later one is. That also caps the memory this can
+// hold, which matters because an entry outlives its component when a streaming
+// remount drops the timer.
+// The length of the copied text is carried along so that a block which kept
+// growing after the copy stops claiming that what is on screen is what is on
+// the clipboard — the common case, since streaming appends to a block while it
+// is visible.
+const COPIED_FEEDBACK_MS = 2000;
+let lastCopied: { key: string; at: number; length: number } | null = null;
+const copyStateListeners = new Set<() => void>();
+
+function publishCopy(next: typeof lastCopied) {
+  lastCopied = next;
+  copyStateListeners.forEach((notify) => notify());
+}
+
+/**
+ * Drops the backslashes the currency escape inserted inside this block, so the
+ * clipboard carries what the author wrote. Without it `awk '{print $1, $2}'`
+ * copies as `awk '{print \$1, \$2}'` and no longer runs — the escape does not
+ * spare code fences, and a bare `\$` in the parsed text cannot be told apart
+ * from one the author typed, so the insertion offsets are the only way to know.
+ *
+ * The parsed body is a contiguous slice of the escaped source for a fenced
+ * block. Where it is not — an indented block, whose leading spaces the parser
+ * strips per line — the text is returned untouched rather than guessed at.
+ */
+function stripInsertedEscapes(
+  body: string,
+  node: unknown,
+  escapedSource: string,
+  insertions: number[],
+): string {
+  if (insertions.length === 0 || !body) return body;
+
+  const position = (node as { position?: { start?: { offset?: number }; end?: { offset?: number } } })
+    ?.position;
+  const start = position?.start?.offset;
+  const end = position?.end?.offset;
+  if (typeof start !== 'number' || typeof end !== 'number') return body;
+
+  const offsetInBlock = escapedSource.slice(start, end).indexOf(body);
+  if (offsetInBlock < 0) return body;
+
+  const bodyStart = start + offsetInBlock;
+  const inBody = insertions
+    .filter((at) => at >= bodyStart && at < bodyStart + body.length)
+    .map((at) => at - bodyStart);
+  if (inBody.length === 0) return body;
+
+  // Indexed by UTF-16 code unit, matching the parser's offsets — splitting by
+  // code point would shift every index after an emoji.
+  const drop = new Set(inBody);
+  let out = '';
+  for (let index = 0; index < body.length; index += 1) {
+    if (!drop.has(index)) out += body[index];
+  }
+  return out;
+}
+
+/**
+ * Text of a block code element — fenced or four-space indented — read from the
+ * hast node rather than from the rendered output: the highlighted branch turns
+ * the source into a tree of styled spans, so reading the DOM would copy markup
+ * instead of code. The trailing newline that closes the block is dropped.
+ */
+function blockCodeText(node: unknown): string {
+  const collect = (n: any): string => {
+    if (!n) return '';
+    if (typeof n.value === 'string') return n.value;
+    if (Array.isArray(n.children)) return n.children.map(collect).join('');
+    return '';
+  };
+  return collect(node).replace(/\n$/, '');
+}
+
+/**
+ * One-click copy for a code block. The document editor already offers this
+ * through its code-action menu; the transcript renders code through this
+ * component instead and had no copy affordance at all. Copying goes through the
+ * Electron clipboard helper rather than a selection, so it does not depend on
+ * selection behaviour in the transcript. See nimbalyst/nimbalyst#1162.
+ */
+const CodeCopyButton: React.FC<{ text: string; feedbackKey: string }> = ({ text, feedbackKey }) => {
+  const [, forceRender] = useState(0);
+
+  // Every button watches the single "what is on the clipboard" record, so a
+  // second copy retires the first block's confirmation immediately instead of
+  // waiting for that block to re-render on its own.
+  useEffect(() => {
+    const notify = () => forceRender((n) => n + 1);
+    copyStateListeners.add(notify);
+    return () => {
+      copyStateListeners.delete(notify);
+    };
+  }, []);
+
+  const isMine =
+    lastCopied !== null &&
+    lastCopied.key === feedbackKey &&
+    lastCopied.length === text.length &&
+    Date.now() - lastCopied.at < COPIED_FEEDBACK_MS;
+  // Carried into the effect deps so that copying the same block again restarts
+  // the timer — keyed on the boolean alone, the second confirmation would
+  // inherit the first one's remaining time.
+  const copiedAt = isMine ? lastCopied!.at : 0;
+  const copied = copiedAt > 0;
+
+  useEffect(() => {
+    if (!copiedAt) return undefined;
+    // Clamped: a clock that jumps backwards would otherwise park the
+    // confirmation for as long as the jump lasted.
+    const elapsed = Date.now() - copiedAt;
+    const remaining = Math.min(COPIED_FEEDBACK_MS, Math.max(0, COPIED_FEEDBACK_MS - elapsed));
+    const timer = setTimeout(() => publishCopy(null), remaining);
+    return () => clearTimeout(timer);
+  }, [copiedAt]);
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await copyToClipboard(text);
+      publishCopy({ key: feedbackKey, at: Date.now(), length: text.length });
+    } catch (err) {
+      console.error('Failed to copy code block:', err);
+    }
+  }, [text, feedbackKey]);
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      title={copied ? 'Copied!' : 'Copy code'}
+      aria-label={copied ? 'Copied!' : 'Copy code'}
+      // 16px, the height of the wrap toggle it sits beside. Anything taller
+      // reaches past the block's top padding and covers the first line of code
+      // — and since this button, unlike the toggle, stays visible without
+      // hover, the covered text would show through it permanently.
+      className={`code-copy-button shrink-0 flex items-center justify-center w-4 h-4 p-0 border-none rounded cursor-pointer bg-[var(--nim-bg-secondary)] transition-colors duration-150 hover:text-nim ${
+        copied ? 'text-nim-success' : 'text-nim-muted'
+      }`}
+    >
+      {copied ? (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="20 6 9 17 4 12"></polyline>
+        </svg>
+      ) : (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+        </svg>
+      )}
+    </button>
+  );
+};
+
+/**
+ * A one-line code block is a command, not a listing. It keeps the pill shape it
+ * always had and gets the button beside it rather than floating over the far
+ * right of the column, and it skips the overflow measurement entirely — the
+ * wrap toggle would sit two controls deep over a 26px pill, and the observers
+ * are the reflow cost the wrapper below exists to avoid.
+ */
+const CompactCodeBlock: React.FC<{
+  children: React.ReactNode;
+  persistKey?: string;
+  copyText?: string;
+  copyKey?: string;
+}> = ({ children, persistKey, copyText, copyKey }) => {
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const feedbackKey = useMemo(() => copyKey || persistKey || nextFallbackKey(), []);
+  // A block-level row, not an inline one: two consecutive single-line blocks
+  // are separated by a bare newline in the markup and would otherwise sit side
+  // by side, turning a list of commands into one line.
+  //
+  // The command scrolls, the button never does. A one-line command is often a
+  // long URL with no break opportunity, and it is exactly the case where the
+  // button matters most — letting the content push it out of an
+  // `overflow-x-hidden` column would remove the feature where it is needed.
+  return (
+    <div className="code-block-compact flex items-center gap-1 max-w-full my-0.5">
+      <span className="min-w-0 overflow-x-auto">{children}</span>
+      {copyText ? <CodeCopyButton text={copyText} feedbackKey={feedbackKey} /> : null}
+    </div>
+  );
+};
+
 const OverflowWrapper: React.FC<{
   children: React.ReactNode;
   /** Stable id for wrap-preference persistence across remounts. Compose
    *  from messageId + AST node offset at the call site. */
   persistKey?: string;
-}> = ({ children, persistKey }) => {
+  /** Raw text of the wrapped code block, used by the copy button. */
+  copyText?: string;
+  /** Identity for the copy confirmation; see `codeBlockCopyKey`. */
+  copyKey?: string;
+}> = ({ children, persistKey, copyText, copyKey }) => {
   // Freeze the key once per mount so the same wrap-preference slot is used
   // for the lifetime of this instance. Re-mounts re-evaluate useMemo and
   // pick up the persisted preference (if any) for the resolved key.
@@ -238,17 +441,20 @@ const OverflowWrapper: React.FC<{
       <div ref={contentRef} className="overflow-content max-w-full overflow-x-auto whitespace-pre">
         {children}
       </div>
-      {(isOverflowing || wordWrap) && (
-        <label className="wrap-toggle flex items-center gap-1 absolute top-1 right-1 text-[0.6875rem] text-[var(--nim-text-faint)] cursor-pointer select-none bg-[var(--nim-bg-secondary)] py-0.5 px-1.5 rounded">
-          <input
-            type="checkbox"
-            checked={wordWrap}
-            onChange={(e) => setWordWrap(e.target.checked)}
-            className="w-3 h-3 m-0 cursor-pointer accent-[var(--nim-primary)]"
-          />
-          <span className="leading-none">Wrap</span>
-        </label>
-      )}
+      <div className="code-block-actions flex items-center gap-1 absolute top-1 right-1">
+        {(isOverflowing || wordWrap) && (
+          <label className="wrap-toggle flex items-center gap-1 text-[0.6875rem] text-[var(--nim-text-faint)] cursor-pointer select-none bg-[var(--nim-bg-secondary)] py-0.5 px-1.5 rounded">
+            <input
+              type="checkbox"
+              checked={wordWrap}
+              onChange={(e) => setWordWrap(e.target.checked)}
+              className="w-3 h-3 m-0 cursor-pointer accent-[var(--nim-primary)]"
+            />
+            <span className="leading-none">Wrap</span>
+          </label>
+        )}
+        {copyText ? <CodeCopyButton text={copyText} feedbackKey={copyKey || wrapKey} /> : null}
+      </div>
     </div>
   );
 };
@@ -492,6 +698,26 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
   onOpenFile,
   messageId
 }) => {
+  // The copy confirmation needs an identity that survives the remount
+  // react-markdown performs on every render. `messageId` supplies one where the
+  // caller has it; the tool-result and sub-agent-prompt renderers do not, and a
+  // per-mount fallback would drop the confirmation on the next streaming chunk —
+  // the user would see the copy un-confirm itself immediately. Scoping to this
+  // renderer instance keeps the key stable there without colliding with another
+  // block at the same offset in a different card.
+  const instanceIdRef = useRef<string | undefined>(undefined);
+  if (!instanceIdRef.current) instanceIdRef.current = nextRendererInstanceId();
+
+  const nodeOffset = (node: unknown): number | undefined =>
+    (node as { position?: { start?: { offset?: number } } } | null | undefined)?.position?.start
+      ?.offset;
+
+  const codeBlockCopyKey = useCallback((node: unknown): string | undefined => {
+    const offset = nodeOffset(node);
+    if (typeof offset !== 'number') return undefined;
+    return `cb:${messageId == null ? instanceIdRef.current : String(messageId)}:${offset}`;
+  }, [messageId]);
+
   // Stable per-block key for the OverflowWrapper wrap-preference cache.
   // Combines the message id (so different messages can never share a slot)
   // with the source-position offset of the code-fence node in the parsed
@@ -570,7 +796,10 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
   // collapse `$7M ... $40M`-style text as inline LaTeX in the transcript.
   // Mirrors the pandoc rules from the Lexical-editor fix in commit baf60b4e9.
   // See nimbalyst/nimbalyst#462.
-  const processedContent = useMemo(() => escapeCurrencyDollars(content), [content]);
+  const { text: processedContent, insertions: escapeInsertions } = useMemo(
+    () => escapeCurrencyDollarsWithMap(content),
+    [content],
+  );
 
   return (
     <div
@@ -640,10 +869,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
                   {codeString}
                 </SyntaxHighlighter>
               );
-              // Only wrap multi-line blocks with OverflowWrapper
-              return isSingleLine
-                ? syntaxBlock
-                : <OverflowWrapper persistKey={codeBlockPersistKey(node)}>{syntaxBlock}</OverflowWrapper>;
+              return syntaxBlock;
             }
 
             // Code block without language
@@ -661,13 +887,33 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
                 {children}
               </code>
             );
-            // Only wrap multi-line blocks with OverflowWrapper
-            return isSingleLine
-              ? codeBlock
-              : <OverflowWrapper persistKey={codeBlockPersistKey(node)}>{codeBlock}</OverflowWrapper>;
+            return codeBlock;
           },
-          // Remove default pre wrapper - we handle styling in code component
-          pre: ({ children }) => <>{children}</>,
+          // `pre` is emitted for block code — fenced and four-space indented —
+          // and never for inline code, so this is the one place that can tell
+          // them apart: react-markdown no longer passes an `inline` flag to the
+          // `code` component. Styling still lives in `code`; these wrappers only
+          // supply the copy button and, for multi-line blocks, the horizontal
+          // overflow handling.
+          pre: ({ children, node }: any) => {
+            const text = stripInsertedEscapes(
+              blockCodeText(node),
+              node,
+              processedContent,
+              escapeInsertions,
+            );
+            const persistKey = codeBlockPersistKey(node);
+            const copyKey = codeBlockCopyKey(node);
+            return text.includes('\n') ? (
+              <OverflowWrapper persistKey={persistKey} copyText={text} copyKey={copyKey}>
+                {children}
+              </OverflowWrapper>
+            ) : (
+              <CompactCodeBlock persistKey={persistKey} copyText={text} copyKey={copyKey}>
+                {children}
+              </CompactCodeBlock>
+            );
+          },
           // Headings
           h1: ({ node: _node, children, style, ...props }: any) => (
             <h1 {...props} style={{
