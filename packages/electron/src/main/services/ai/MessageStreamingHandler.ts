@@ -1120,6 +1120,8 @@ export class MessageStreamingHandler {
     const sessionStateManagerForWake = getSessionStateManager();
     const onTeammateMessageWhileIdle = createTeammateIdleWakeListener({
       isSessionActive: (id) => sessionStateManagerForWake.isSessionActive(id),
+      hasParkedQuery: (id) => typeof (provider as any).hasParkedLeaseForSession === 'function'
+        && (provider as any).hasParkedLeaseForSession(id),
       startSession: (options) => sessionStateManagerForWake.startSession(options),
       endSession: (id) => sessionStateManagerForWake.endSession(id),
       turnWorkspacePath: () => effectiveWorkspacePath,

@@ -41,6 +41,8 @@ export interface TrackedSystemTask {
    * discarded with the task.
    */
   pendingTerminalNotification?: TaskTerminalNotification;
+  /** Generation of the query this task started in. See ClaudeCodeProvider.queryGeneration. */
+  queryGeneration?: number;
 }
 
 /**
@@ -85,6 +87,8 @@ export interface ApplySystemTaskChunkParams {
   graceExpired: boolean;
   /** Appended to when a terminal notification is worth a continuation turn. */
   notifications: TaskTerminalNotification[];
+  /** Stamped on task_started so a later turn can tell inherited tasks apart. */
+  queryGeneration?: number;
   log?: (message: string) => void;
 }
 
@@ -111,6 +115,7 @@ export function applySystemTaskChunk(params: ApplySystemTaskChunkParams): boolea
       toolCount: 0,
       tokenCount: 0,
       durationMs: 0,
+      queryGeneration: params.queryGeneration,
     });
     log(`[CLAUDE-CODE] SUBAGENT_TASK started: id=${chunk.task_id} type=${chunk.task_type ?? 'n/a'} desc="${(chunk.description || '').substring(0, 80)}"`);
     return true;

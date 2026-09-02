@@ -19,6 +19,8 @@ export interface WakeTargetWindow {
 
 export interface TeammateIdleWakeDeps<W extends WakeTargetWindow = WakeTargetWindow> {
   isSessionActive: (sessionId: string) => boolean;
+  /** Whether the provider holds a query parked for a follow-up turn (#1269). */
+  hasParkedQuery?: (sessionId: string) => boolean;
   startSession: (options: { sessionId: string; workspacePath: string }) => Promise<void>;
   endSession: (sessionId: string) => Promise<void>;
   /** Workspace path of the turn that installed this listener. */
@@ -47,8 +49,18 @@ export function createTeammateIdleWakeListener<W extends WakeTargetWindow>(deps:
     // Don't wake a session that already ended (e.g., all teammates completed
     // between the message being queued and this handler running).
     if (!deps.isSessionActive(data.sessionId)) {
-      deps.logInfo(`[AIService] Ignoring teammate message for ended session ${data.sessionId}`);
-      return;
+      // One window where an inactive session is not an ended one: a handover
+      // parked the live query and forced the session idle so the waiting
+      // prompt could dispatch, and that prompt's startSession() has not run
+      // yet. The provider still owns the subprocess and owes a turn. The
+      // message has already been taken out of the teammate queue by the time
+      // it gets here, so returning discards a finished sub-agent's result
+      // outright. #1269.
+      if (!deps.hasParkedQuery?.(data.sessionId)) {
+        deps.logInfo(`[AIService] Ignoring teammate message for ended session ${data.sessionId}`);
+        return;
+      }
+      deps.logInfo(`[AIService] Teammate message for ${data.sessionId} arrived while its query was parked for a follow-up turn; accepting instead of dropping it`);
     }
     deps.logInfo(`[AIService] Teammate message while lead idle, triggering sendMessage for session ${data.sessionId}`);
     // Load with the workspace that owns the session row. The turn's path can be
