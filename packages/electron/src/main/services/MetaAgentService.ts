@@ -1310,9 +1310,17 @@ export class MetaAgentService {
       // counting `executing` would include the current turn itself and
       // suppress every notification, including the final terminal one.
       //
-      // The other event types (error/waiting/interrupted) are always
-      // meaningful and pass through.
-      if (eventType === 'session:completed') {
+      // #1269: session:interrupted is the same between-turn pause under another
+      // name whenever a prompt is waiting. Forcing the session idle is how a
+      // waiting prompt gets to dispatch at all -- send-now interrupts the live
+      // turn and QueueDriveService re-drives the queue on this very event -- so
+      // a terminal event still follows. Reporting the child as interrupted here
+      // makes the parent re-plan around work that is about to continue. An
+      // interrupt with nothing queued is a real stop and still passes through.
+      //
+      // session:error and session:waiting are always meaningful and pass
+      // through.
+      if (eventType === 'session:completed' || eventType === 'session:interrupted') {
         const { rows: pendingRows } = await databaseWorker.query<{ count: string }>(
           `SELECT COUNT(*)::text AS count FROM queued_prompts
            WHERE session_id = $1 AND status = 'pending'`,

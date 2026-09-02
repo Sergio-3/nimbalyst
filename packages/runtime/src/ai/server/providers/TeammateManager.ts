@@ -6,6 +6,7 @@
  */
 
 import { query, type SDKUserMessage, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { ContentBlockParam } from '@anthropic-ai/sdk/resources';
 
 // Query interface not properly exported by SDK, so we define it inline
 interface Query extends AsyncGenerator<SDKMessage, void> {
@@ -95,6 +96,32 @@ export interface TeammateManagerDeps {
 export interface PackagedBuildOptions {
   env: Record<string, string | undefined>;
   pathToClaudeCodeExecutable?: string;
+}
+
+/**
+ * The payload for a user turn injected into an already-running query.
+ *
+ * Shared by both delivery routes — the teammate path, which wraps it in a
+ * one-shot stream for `streamInput()`, and the handover adoption, which pushes
+ * it onto the live prompt stream — so an injected turn is built in exactly one
+ * place. #1269.
+ *
+ * `content` takes blocks as well as text: attachments ride in the message, not
+ * in the options the process was started with, so an injected turn can carry
+ * them exactly like a turn that opens its own query (measured against the
+ * pinned SDK: a second message with image blocks on an open prompt stream is
+ * accepted and answered from the image). #1269.
+ */
+export function buildInjectedUserMessage(content: string | ContentBlockParam[]): SDKUserMessage {
+  return {
+    type: 'user',
+    message: {
+      role: 'user',
+      content,
+    },
+    parent_tool_use_id: null,
+    session_id: '',  // Populated by SDK on delivery
+  };
 }
 
 // ─── Class ──────────────────────────────────────────────────────────────────
@@ -211,15 +238,7 @@ export class TeammateManager {
    * Public so ClaudeCodeProvider can use it for streamInput injection.
    */
   createInjectedUserMessageStream(content: string): AsyncIterable<SDKUserMessage> {
-    const payload: SDKUserMessage = {
-      type: 'user',
-      message: {
-        role: 'user',
-        content,
-      },
-      parent_tool_use_id: null,
-      session_id: '',  // Populated by SDK on delivery
-    };
+    const payload = buildInjectedUserMessage(content);
     async function* stream() {
       yield payload;
     }

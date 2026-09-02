@@ -413,8 +413,152 @@ export type DrainExitCause =
   | 'resolved' // sub-agents finished (or turn ended with none running)
   | 'aborted' // abort() / supersede — the AbortController fired
   | 'interrupted' // interruptWithMessage() — teammate/user interrupt
+  | 'handover' // the live query was parked as a lease for a follow-up turn
   | 'iterator-done' // the SDK iterator ended on its own
   | 'iterator-error'; // the SDK iterator threw
+
+/**
+ * Default expiry for a lease nobody adopts. The follow-up prompt can be swept,
+ * raced away or deleted, and the adopting turn can throw before it reaches the
+ * adoption site; the subprocess then runs unowned and its tasks stay 'running',
+ * pinning every later turn in a drain that cannot settle.
+ *
+ * NOT calibrated: the measured adoption happened 70ms after the handover, so
+ * this is slack, not a deadline anyone should tune against.
+ */
+export const DEFAULT_PARKED_LEASE_MAX_AGE_MS = 30_000;
+
+/**
+ * Resolve the lease expiry, allowing an env override so tests need not wait it
+ * out. Invalid / non-positive values fall back to the default. Mirrors
+ * `resolveShellDrainMs`.
+ */
+export function resolveParkedLeaseMaxAgeMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env.NIMBALYST_CC_PARKED_LEASE_MAX_AGE_MS;
+  const n = raw !== undefined ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_PARKED_LEASE_MAX_AGE_MS;
+}
+
+export type HandoverState =
+  | 'requested' // someone asked, the streaming loop has not reacted yet
+  | 'accepted' // the loop left its drain for it; only this state may park
+  | 'abandoned'; // the request timed out, the caller fell back to a real interrupt
+
+/**
+ * Decide whether the teardown block parks the live query as a lease or tears it
+ * down normally. Parking keys off the loop's EXIT, never off the request, which
+ * only says someone asked — an iterator that died meanwhile leaves a corpse to
+ * hand on. Every condition lives here rather than beside the call, because a
+ * check made outside fails SILENTLY into the normal teardown while the exit
+ * cause still says `handover`, and that pairing closes the query with
+ * `markStopped: false` — the pinned "Thinking…" this fix exists to remove. #1269.
+ */
+export function resolveHandoverPark(params: {
+  state: HandoverState | null;
+  exitCause: DrainExitCause;
+  hasLiveQuery: boolean;
+  /** The prompt controller that keeps the query's stdin open is still held. */
+  hasPromptController: boolean;
+  /**
+   * The drain grace timer ends that stream on a timeout while the controller
+   * object survives, so presence alone would pass a park whose follow-up prompt
+   * can no longer be pushed — killing the sub-agents the park preserves.
+   */
+  promptStreamEnded: boolean;
+  hasAbortController: boolean;
+  /** Already fired: the query is dying, parking hands on a dead transport. */
+  abortSignalFired: boolean;
+}): 'park' | 'teardown' {
+  const parkable =
+    params.state === 'accepted'
+    && params.exitCause === 'handover'
+    && params.hasLiveQuery
+    && params.hasPromptController
+    && !params.promptStreamEnded
+    && params.hasAbortController
+    && !params.abortSignalFired;
+  return parkable ? 'park' : 'teardown';
+}
+
+/**
+ * `Query[Symbol.asyncIterator]()` gives every caller the SAME generator, so a
+ * fresh `next()` lines up BEHIND the read the handing-over turn left in flight:
+ * that first message — typically a sub-agent's terminal `task_notification` —
+ * would resolve a promise nobody awaits and pin its task 'running' forever.
+ * Hence the streaming loop consumes `inFlight` before the iterator. #1269.
+ */
+export function createChunkReader<T>(
+  iterator: { next: () => Promise<IteratorResult<T>> },
+  inFlight: Promise<IteratorResult<T>> | null,
+): () => Promise<IteratorResult<T>> {
+  let pending = inFlight;
+  return () => {
+    if (pending) {
+      const chunk = pending;
+      pending = null;
+      return chunk;
+    }
+    return iterator.next();
+  };
+}
+
+/**
+ * Running tasks stamped with a query generation other than the live one. The
+ * stamp travels with the query when a turn adopts it, so a foreign stamp means
+ * some exit path closed a query without reaping its tasks — the shape of #1269,
+ * and the only detector here that does not depend on our model of the exit paths
+ * being complete. Callers log it and reap, turning an unknown edge into a
+ * self-heal instead of a permanent "Thinking…".
+ */
+export function findForeignRunningTasks<T extends MutableSubagentTask & { queryGeneration?: number }>(
+  tasks: Iterable<T>,
+  currentGeneration: number,
+): T[] {
+  const foreign: T[] = [];
+  for (const task of tasks) {
+    if (task.status !== 'running') continue;
+    if (task.queryGeneration === currentGeneration) continue;
+    foreign.push(task);
+  }
+  return foreign;
+}
+
+/**
+ * Does this turn's teardown have to reap background tasks itself? Only a turn
+ * that ADOPTED a lease can hold tasks older than itself, and one interrupted
+ * while still generating never enters the drain that would normally reap them —
+ * an interrupt is not an abort, so nothing else does either. The leftovers then
+ * make every later turn defer teardown into a drain that can never settle. #1269.
+ */
+export function shouldReapAdoptedTasks(params: {
+  adoptedLease: boolean;
+  /** This turn handed its query on again, so the tasks keep a live owner. */
+  parkedForHandover: boolean;
+  /** This turn ended inside a drain, which does its own reaping. */
+  wasDraining: boolean;
+  /**
+   * False on the crash-retry path, where a nested run has already replaced and
+   * torn down the query — reaping there would settle the NESTED run's live
+   * sub-agents.
+   */
+  ownsQuery: boolean;
+  /**
+   * The interrupt reaps the running tasks itself, so `hasRunningTasks` is
+   * already false when this runs — without this the query has no owner left and
+   * is never closed, and its subprocess outlives the turn that was using it.
+   */
+  wasInterrupted: boolean;
+  /** With none, teardown would close a healthy query for nothing. */
+  hasRunningTasks: boolean;
+}): boolean {
+  return params.ownsQuery
+    && params.adoptedLease
+    && !params.parkedForHandover
+    && !params.wasDraining
+    && (params.wasInterrupted || params.hasRunningTasks);
+}
 
 export interface DrainOutcome {
   /** Mark still-running tasks as stopped (they will never report completion). */
@@ -438,6 +582,12 @@ export function classifyDrainOutcome(params: {
   cause: DrainExitCause;
 }): DrainOutcome {
   if (!params.wasDraining || !params.hasRunningTasks) {
+    return { markStopped: false, autoContinue: false };
+  }
+  // A handover is not a death: the query stays open under the follow-up turn and
+  // the sub-agents keep reporting into it. Reaping here would declare live work
+  // dead and suppress its results for good. See #1269.
+  if (params.cause === 'handover') {
     return { markStopped: false, autoContinue: false };
   }
   const unexpected = params.cause === 'iterator-done' || params.cause === 'iterator-error';
