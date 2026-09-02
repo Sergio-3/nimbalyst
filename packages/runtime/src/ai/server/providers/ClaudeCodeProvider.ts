@@ -3447,7 +3447,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
               t.status === 'running' ? { ...t, status: 'stopped' } : t
             );
             await AISessionsRepository.updateMetadata(sessionId, {
-              metadata: { ...currentSession?.metadata, currentTasks: cleaned }
+              metadata: this.withLiveDrainFlag({ ...currentSession?.metadata, currentTasks: cleaned })
             });
             this.emit('message:logged', { sessionId, direction: 'output' });
             // console.log(`[CLAUDE-CODE] Cleaned up ${tasks.filter((t: any) => t.status === 'running').length} stale running tasks`);
@@ -3781,10 +3781,10 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       const currentMetadata = currentSession?.metadata || {};
 
       await AISessionsRepository.updateMetadata(sessionId, {
-        metadata: {
+        metadata: this.withLiveDrainFlag({
           ...currentMetadata,
           currentTodos: todos
-        }
+        })
       });
 
 
@@ -3800,6 +3800,26 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
     }
   }
 
+  /**
+   * Stamp the live drain state onto a metadata blob that is about to be written.
+   *
+   * Session metadata is one blob and several writers update it concurrently,
+   * each read-modify-write and each fire-and-forget. Sequentially that is
+   * harmless — the blob a writer read already carries `backgroundDrain`, and it
+   * hands the same value back. Overlapping it is not: a writer that read before
+   * emitBackgroundDrainUpdate() wrote, and lands after it, puts the pre-drain
+   * value back. That revert then sticks, because emitBackgroundDrainUpdate()
+   * early-returns while `publishedBackgroundDrain` still claims the value is
+   * out there — so no correction and no reload event follow.
+   *
+   * Taking the value from `this` rather than from the blob makes every write
+   * carry the truth as of the write, which is the only ordering that holds
+   * without serialising the writers. #1269.
+   */
+  private withLiveDrainFlag(metadata: Record<string, unknown>): Record<string, unknown> {
+    return { ...metadata, backgroundDrain: this.drainingBackgroundTasks };
+  }
+
   private async emitTaskUpdate(sessionId: string | undefined): Promise<void> {
     if (!sessionId) return;
 
@@ -3809,14 +3829,10 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       const currentMetadata = currentSession?.metadata || {};
 
       await AISessionsRepository.updateMetadata(sessionId, {
-        metadata: {
+        metadata: this.withLiveDrainFlag({
           ...currentMetadata,
           currentTasks: Array.from(this.activeTasks.values()),
-          // Carried along because this read-modify-write races the drain update
-          // below; without it a task notification arriving right after the drain
-          // began would write the pre-drain metadata back.
-          backgroundDrain: this.drainingBackgroundTasks,
-        }
+        })
       });
 
       this.emit('message:logged', { sessionId, direction: 'output' });
@@ -3890,11 +3906,11 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       const currentMetadata = currentSession?.metadata || {};
 
       await AISessionsRepository.updateMetadata(sessionId, {
-        metadata: {
+        metadata: this.withLiveDrainFlag({
           ...currentMetadata,
           // Sorted by numeric id so the board renders in creation order.
           currentTaskList: sortTaskList(this.taskListItems.values()),
-        }
+        })
       });
 
       this.emit('message:logged', { sessionId, direction: 'output' });
