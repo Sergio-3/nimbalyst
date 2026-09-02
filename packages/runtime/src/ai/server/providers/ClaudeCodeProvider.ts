@@ -1623,7 +1623,10 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
             // registered they would open a drain that can never settle. #1269.
             this.reapForeignRunningTasks(sessionId);
 
-            const willDrainSubagents = shouldDeferTeardownForSubagents(this.hasRunningTasks());
+            const willDrainSubagents = shouldDeferTeardownForSubagents(
+              this.hasRunningTasks(),
+              state.sawTaskNotificationThisTurn,
+            );
             if (willDrainSubagents) {
               this.drainingBackgroundTasks = true;
               // Tell the renderer the lead is done and only sub-agents remain, so
@@ -3089,24 +3092,28 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
           existing.durationMs = chunk.usage.duration_ms ?? existing.durationMs;
         }
         console.log(`[CLAUDE-CODE] SUBAGENT_TASK notification: id=${chunk.task_id} status=${existing.status} draining=${this.drainingBackgroundTasks}`);
-        // While draining after the lead turn ended, capture terminal
-        // notifications so finalizeBackgroundDrain can wake the session with
-        // the results (the CLI's own continuation turn cannot be surfaced —
-        // the consumer already received complete). NIM-1470.
-        if (this.drainingBackgroundTasks) {
-          const status = existing.status === 'running' ? 'completed' : existing.status;
-          this.drainTerminalNotifications.push({
-            taskId: chunk.task_id,
-            description: existing.description,
-            status,
-            summary: chunk.summary,
-            outputFile: chunk.output_file,
-            // A 'stopped' that arrives after our grace timer closed the stream
-            // is our own kill, not a user stop — report it as one. #1355.
-            killedByTeardown: status === 'stopped' && this.drainGraceExpired,
-            elapsedMs: Date.now() - existing.startedAt,
-          });
-        }
+        // Capture every terminal notification so finalizeBackgroundDrain can wake
+        // the session with the results (the CLI's own continuation turn cannot be
+        // surfaced — the consumer already received complete). NIM-1470.
+        //
+        // Deliberately NOT gated on drainingBackgroundTasks: a task that settles
+        // while the turn is still streaming reports before the drain opens, and
+        // gating dropped exactly the notification the continuation had to
+        // announce. The field is per-turn (reset in the `finally`) and read only
+        // by finalizeBackgroundDrain, which no-ops outside a drain — so a turn
+        // that never drains is unaffected. #1410.
+        const status = existing.status === 'running' ? 'completed' : existing.status;
+        this.drainTerminalNotifications.push({
+          taskId: chunk.task_id,
+          description: existing.description,
+          status,
+          summary: chunk.summary,
+          outputFile: chunk.output_file,
+          // A 'stopped' that arrives after our grace timer closed the stream
+          // is our own kill, not a user stop — report it as one. #1355.
+          killedByTeardown: status === 'stopped' && this.drainGraceExpired,
+          elapsedMs: Date.now() - existing.startedAt,
+        });
         this.emitTaskUpdate(sessionId).catch(() => {});
       }
     } else if (subtype === 'task_updated') {
