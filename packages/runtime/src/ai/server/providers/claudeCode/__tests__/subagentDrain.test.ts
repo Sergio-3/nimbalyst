@@ -16,6 +16,10 @@ import {
   shouldArmGraceTimerForResult,
   shouldContinueWithTaskResults,
   buildTaskResultContinuationMessage,
+  shouldReapAdoptedTasks,
+  resolveHandoverPark,
+  createChunkReader,
+  findForeignRunningTasks,
 } from '../subagentDrain';
 
 describe('shouldSettleTaskFromToolResult', () => {
@@ -454,7 +458,165 @@ describe('shouldExitDrain', () => {
   });
 });
 
+describe('resolveHandoverPark', () => {
+  /** A handover that is about to park: every condition satisfied. */
+  const parkable = {
+    state: 'accepted',
+    exitCause: 'handover',
+    hasLiveQuery: true,
+    hasPromptController: true,
+    promptStreamEnded: false,
+    hasAbortController: true,
+    abortSignalFired: false,
+  } satisfies Parameters<typeof resolveHandoverPark>[0];
+
+  it('parks only when the loop accepted, exited for the handover, and still holds a query', () => {
+    expect(resolveHandoverPark(parkable)).toBe('park');
+  });
+
+  // The v2 regression: the 5s park timeout fired after the loop had already
+  // accepted, cleared the request flag, and the teardown then read "no handover"
+  // and closed a query whose sub-agents were reported as still running. The
+  // decision hangs off the accepted state, so a late timeout cannot revoke it.
+  // #1269.
+  it('still parks when the request timed out after the loop accepted', () => {
+    expect(resolveHandoverPark(parkable)).toBe('park');
+    expect(resolveHandoverPark({ ...parkable, state: 'abandoned' })).toBe('teardown');
+  });
+
+  // Parking on the REQUEST rather than the exit handed the follow-up turn a
+  // corpse: the iterator died while the requester was still waiting, and close,
+  // reap and auto-continue were all skipped. #1269.
+  it('tears down when the iterator died while the handover was pending', () => {
+    for (const exitCause of ['iterator-done', 'iterator-error', 'aborted', 'interrupted'] as const) {
+      expect(resolveHandoverPark({ ...parkable, state: 'requested', exitCause })).toBe('teardown');
+      expect(resolveHandoverPark({ ...parkable, exitCause })).toBe('teardown');
+    }
+  });
+
+  it('tears down when there is no query left to hand on', () => {
+    expect(resolveHandoverPark({ ...parkable, hasLiveQuery: false })).toBe('teardown');
+  });
+
+  it('tears down when no handover was ever requested', () => {
+    expect(
+      resolveHandoverPark({ ...parkable, state: null, exitCause: 'resolved' }),
+    ).toBe('teardown');
+  });
+
+  // These three used to be checked beside the call instead of inside it, where a
+  // missing part fell through to the normal teardown while the exit cause still
+  // read 'handover' — the pairing that closes the query and leaves its tasks
+  // 'running'. Answering inside means the caller has one decision to react to.
+  // #1269.
+  it('tears down when a part of the lease is missing', () => {
+    expect(resolveHandoverPark({ ...parkable, hasPromptController: false })).toBe('teardown');
+    expect(resolveHandoverPark({ ...parkable, hasAbortController: false })).toBe('teardown');
+  });
+
+  // An abort() landing between the loop's exit and the teardown leaves an
+  // abortController that has already fired; the query it governs is on its way
+  // out, so parking it hands the follow-up turn a dead transport. #1269.
+  it('tears down when the abort signal fired after the loop accepted', () => {
+    expect(resolveHandoverPark({ ...parkable, abortSignalFired: true })).toBe('teardown');
+  });
+
+  // Holding the controller is not the same as being able to push on it. The
+  // drain grace timer ends the prompt stream on a timeout and the object stays
+  // in hand reporting isEnded(), so every presence check still passed and the
+  // query was parked with a stream nothing could be delivered on — the adoption
+  // then failed at push() and the sub-agents the park existed for died anyway.
+  // #1269.
+  it('tears down when the prompt stream was already ended', () => {
+    expect(resolveHandoverPark({ ...parkable, promptStreamEnded: true })).toBe('teardown');
+  });
+});
+
+describe('findForeignRunningTasks', () => {
+  // The runtime backstop for an exit path nobody enumerated: a task still
+  // registered as running under a query generation that is gone pins every later
+  // drain. #1269.
+  it('reports running tasks from an older query generation only', () => {
+    const tasks = [
+      { taskId: 'stale', status: 'running', queryGeneration: 3 },
+      { taskId: 'current', status: 'running', queryGeneration: 4 },
+      { taskId: 'settled', status: 'completed', queryGeneration: 3 },
+    ];
+
+    expect(findForeignRunningTasks(tasks, 4).map(t => t.taskId)).toEqual(['stale']);
+  });
+
+  // Tasks registered before generations existed (or by a path that forgot to
+  // stamp) must not be silently trusted — an unstamped running task is exactly
+  // the unknown edge this detector is for.
+  it('treats an unstamped running task as foreign', () => {
+    expect(
+      findForeignRunningTasks([{ taskId: 'nostamp', status: 'running' }], 1).map(t => t.taskId),
+    ).toEqual(['nostamp']);
+  });
+});
+
+describe('shouldReapAdoptedTasks', () => {
+  /** An adopted turn unwinding outside a drain with tasks left to reap. */
+  const reapable = {
+    adoptedLease: true,
+    parkedForHandover: false,
+    wasDraining: false,
+    ownsQuery: true,
+    wasInterrupted: false,
+    hasRunningTasks: true,
+  } satisfies Parameters<typeof shouldReapAdoptedTasks>[0];
+
+  // The regression this exists for: a turn adopts a handover lease, the user
+  // interrupts it while it is still generating, and the inherited tasks are left
+  // registered as running forever — pinning every later turn in a drain that
+  // cannot settle. #1269.
+  it('reaps when an adopted turn ends outside a drain and hands nothing on', () => {
+    expect(shouldReapAdoptedTasks(reapable)).toBe(true);
+  });
+
+  it('leaves the drain path and a further handover to their own owners', () => {
+    expect(shouldReapAdoptedTasks({ ...reapable, wasDraining: true })).toBe(false);
+    expect(shouldReapAdoptedTasks({ ...reapable, parkedForHandover: true })).toBe(false);
+  });
+
+  // A turn that never adopted cannot hold tasks older than itself, so reaping
+  // here would change behaviour on the ordinary interrupt path.
+  it('never reaps for a turn that did not adopt a lease', () => {
+    expect(shouldReapAdoptedTasks({ ...reapable, adoptedLease: false })).toBe(false);
+  });
+
+  // The crash-retry path (#1361) re-enters sendMessage; the nested run replaces
+  // the query and tears down its own, so by the time the outer run unwinds it
+  // owns nothing. Reaping there settled the NESTED run's live sub-agents. #1269.
+  it('reaps nothing for a run whose query a nested run already replaced', () => {
+    expect(shouldReapAdoptedTasks({ ...reapable, ownsQuery: false })).toBe(false);
+  });
+
+  // With nothing running there is nothing to reap, and the teardown this gates
+  // aborts and closes the query — a healthy one, whose subprocess the next turn
+  // would then have to start cold. #1269.
+  //
+  // Unless the turn was interrupted: that query is not healthy and has no owner
+  // left, and the interrupt has already stopped the very tasks whose absence
+  // would otherwise wave the teardown off — so its subprocess was never closed.
+  it('leaves a healthy query alone when an adopted turn ends with no tasks running', () => {
+    expect(shouldReapAdoptedTasks({ ...reapable, hasRunningTasks: false })).toBe(false);
+    expect(shouldReapAdoptedTasks({ ...reapable, hasRunningTasks: false, wasInterrupted: true }))
+      .toBe(true);
+  });
+});
+
 describe('classifyDrainOutcome', () => {
+  // A handover did not close the query — the sub-agents run on inside it and
+  // their notifications land in the adopting turn. Reaping would report live
+  // work as dead. #1269.
+  it('reaps nothing on a handover', () => {
+    expect(
+      classifyDrainOutcome({ wasDraining: true, hasRunningTasks: true, cause: 'handover' }),
+    ).toEqual({ markStopped: false, autoContinue: false });
+  });
+
   it('does nothing when we were not draining', () => {
     expect(
       classifyDrainOutcome({ wasDraining: false, hasRunningTasks: true, cause: 'iterator-error' }),
@@ -483,5 +645,42 @@ describe('classifyDrainOutcome', () => {
     expect(
       classifyDrainOutcome({ wasDraining: true, hasRunningTasks: true, cause: 'interrupted' }),
     ).toEqual({ markStopped: true, autoContinue: false });
+  });
+});
+
+describe('createChunkReader', () => {
+  // The SDK hands every caller the same generator, so a read abandoned by the
+  // turn that gave the query away is not harmless: the next message resolves
+  // THAT promise, and a fresh next() lines up behind it. The lost message is
+  // typically the sub-agent's terminal task_notification, which is what pinned
+  // the task 'running' and left the session spinning. #1269.
+  it('delivers the in-flight read as the first chunk instead of starting a new one', async () => {
+    let nextCalls = 0;
+    let release: ((r: IteratorResult<string>) => void) | null = null;
+    const iterator = {
+      next: () => {
+        nextCalls++;
+        return Promise.resolve({ done: false as const, value: `fresh-${nextCalls}` });
+      },
+    };
+    const inFlight = new Promise<IteratorResult<string>>((resolve) => { release = resolve; });
+
+    const read = createChunkReader(iterator, inFlight);
+    const first = read();
+    expect(nextCalls).toBe(0);
+
+    release!({ done: false, value: 'task_notification' });
+    expect(await first).toEqual({ done: false, value: 'task_notification' });
+
+    // Only the inherited read is special; everything after comes from the
+    // iterator as usual.
+    expect(await read()).toEqual({ done: false, value: 'fresh-1' });
+    expect(nextCalls).toBe(1);
+  });
+
+  it('reads straight from the iterator when nothing was inherited', async () => {
+    const iterator = { next: () => Promise.resolve({ done: false as const, value: 'chunk' }) };
+    const read = createChunkReader(iterator, null);
+    expect(await read()).toEqual({ done: false, value: 'chunk' });
   });
 });

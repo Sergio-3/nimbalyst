@@ -106,4 +106,37 @@ describe('SessionStateManager', () => {
       sql.includes('UPDATE ai_sessions SET status = $1') && params?.[0] === 'idle' && params?.[1] === 'session-missing'
     )).toBe(true);
   });
+
+  // #1269: a send-now during a background sub-agent drain hands the live query to
+  // the follow-up turn. The turn is over, the work is not — the sub-agents keep
+  // running inside the handed-on query. Ending the session here said both at once:
+  // the queue was freed (needed) and the session was declared finished (false),
+  // which evicted it from the live map and cleared every sign of work in the UI.
+  it('releases a handed-over turn without declaring the session finished', async () => {
+    const listener = vi.fn<(event: SessionStateEvent) => void>();
+    manager.subscribe(listener);
+
+    await manager.startSession({
+      sessionId: 'session-handover',
+      workspacePath: '/workspace/project',
+    });
+
+    listener.mockClear();
+
+    await manager.releaseTurnForHandover('session-handover');
+
+    // "No turn is live": the queue drive's busy gate reads exactly this set, and
+    // the deferred prompt wakes on the terminal event.
+    expect(manager.getRunningSessionIds()).not.toContain('session-handover');
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'session:interrupted',
+      sessionId: 'session-handover',
+      workspacePath: '/workspace/project',
+    }));
+
+    // ...but the session is still there. interruptSession() deleted it, so the
+    // adopting turn's next activity update arrived for an unknown session.
+    expect(manager.isSessionActive('session-handover')).toBe(true);
+    expect(manager.getSessionState('session-handover')?.workspacePath).toBe('/workspace/project');
+  });
 });

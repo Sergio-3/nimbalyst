@@ -121,8 +121,25 @@ export function readProviderWorkflowCatalog(
   };
 }
 
+/**
+ * What the caller already knows about the turn that will follow this interrupt.
+ * Passed in rather than discovered by the provider, because the interrupt
+ * handler is what holds the prompt queue. Omitted or `null` means "no follow-up
+ * known", which is never a reason to hand a live query over. `canAdoptQuery`
+ * says the waiting prompt can run on the query that is already open.
+ *
+ * Attachments are not a reason to say false: they travel in the message, not in
+ * the options the process was started with, and the pinned SDK accepts a second
+ * message carrying image blocks on an open prompt stream. No caller currently
+ * has a reason to pass false — the remaining bar to adoption is the query's own
+ * options signature, which the provider checks for itself. #1269.
+ */
+export interface TurnHandoverCandidate {
+  canAdoptQuery: boolean;
+}
+
 export interface InterruptTurnResult {
-  method: 'interrupt' | 'abort';
+  method: 'interrupt' | 'abort' | 'handover';
   /**
    * Whether there was actually a live turn to interrupt. Omitted by providers
    * that can't tell — `false` is a positive claim that the interrupt hit
@@ -176,8 +193,11 @@ export interface AIProvider extends EventEmitter {
    * override this to wrap up cleanly without killing the subprocess; others
    * fall back to the default `abort()` and rely on the caller to trigger the
    * next queued prompt. The return value lets the caller distinguish the two.
+   *
+   * Hand the live query to `followUp` only when it can adopt the query, else a
+   * live subprocess goes to a turn that never comes.
    */
-  interruptCurrentTurn(): Promise<InterruptTurnResult>;
+  interruptCurrentTurn(followUp?: TurnHandoverCandidate | null): Promise<InterruptTurnResult>;
 
   /**
    * Get the transport-shape capabilities of this provider (does it stream, does
@@ -295,8 +315,10 @@ export abstract class BaseAIProvider extends EventEmitter implements AIProvider 
    * decide whether they should also explicitly trigger queue processing
    * (always do, since both paths land in the same completion event in the
    * end).
+   *
+   * `followUp` is ignored here: a hard abort has no query left to hand on.
    */
-  async interruptCurrentTurn(): Promise<InterruptTurnResult> {
+  async interruptCurrentTurn(_followUp?: TurnHandoverCandidate | null): Promise<InterruptTurnResult> {
     this.abort();
     return { method: 'abort' };
   }

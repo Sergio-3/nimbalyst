@@ -50,11 +50,12 @@ import {
   CLAUDE_CODE_SAFE_FALLBACK_MODEL,
   baseContextWindowForVariant,
 } from '../../modelConstants';
-import type { InterruptTurnResult } from '../AIProvider';
+import type { ContentBlockParam } from '@anthropic-ai/sdk/resources';
+import type { InterruptTurnResult, TurnHandoverCandidate } from '../AIProvider';
 import { isBedrockToolSearchError } from '../utils/errorDetection';
 import { AgentMessagesRepository } from '../../../storage/repositories/AgentMessagesRepository';
 import { TranscriptMigrationRepository } from '../../../storage/repositories/TranscriptMigrationRepository';
-import { TeammateManager, type TeammateToLeadMessage } from './TeammateManager';
+import { TeammateManager, buildInjectedUserMessage, type TeammateToLeadMessage } from './TeammateManager';
 import path from 'path';
 import { buildClaudeCodeSystemPrompt, buildMetaAgentSystemPrompt, type MetaAgentWorkflowPreset } from '../../prompt';
 
@@ -101,7 +102,7 @@ import {
   type ToolPermissionOptions,
 } from './claudeCode/toolAuthorization';
 import { ClaudeCodeDeps, type HistoryManagerPort } from './claudeCode/dependencyInjection';
-import { resolvePermissionMode, type PromptStreamController } from './claudeCode/sdkOptionsBuilder';
+import { buildQueryOptionsSignature, resolvePermissionMode, type PromptStreamController } from './claudeCode/sdkOptionsBuilder';
 import { resolveEffectiveSessionMode } from './claudeCode/resolveEffectiveSessionMode';
 import { resolveClaudeConfigDir } from './claudeCode/claudeConfigDir';
 import {
@@ -113,6 +114,11 @@ import {
   shouldDeferTeardownForSubagents,
   shouldExitDrain,
   classifyDrainOutcome,
+  shouldReapAdoptedTasks,
+  resolveHandoverPark,
+  resolveParkedLeaseMaxAgeMs,
+  createChunkReader,
+  findForeignRunningTasks,
   shouldSettleTaskFromToolResult,
   isBackgroundLaunchAcknowledgement,
   shouldFinalizeForSettledBackgroundTasks,
@@ -122,6 +128,7 @@ import {
   shouldContinueWithTaskResults,
   buildTaskResultContinuationMessage,
   type DrainExitCause,
+  type HandoverState,
   type TaskTerminalNotification,
 } from './claudeCode/subagentDrain';
 import { applySystemTaskChunk, recordBackgroundEvidence, type TrackedSystemTask } from './claudeCode/systemTaskChunks';
@@ -206,6 +213,13 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
 
   // Lead query reference for interruptWithMessage support
   private leadQuery: Query | null = null;
+  // The abort controller the SDK was handed for `leadQuery`, recorded as a pair
+  // with it. `this.abortController` cannot serve: sendMessage replaces that
+  // field at its entry, so a turn unwinding later would hand its lease a
+  // controller no query ever received — one that looks perfectly healthy and
+  // whose abort reaches nothing, leaving the parked query beyond any Stop.
+  // Identity is the only thing that catches that. #1269.
+  private leadQueryAbortController: AbortController | null = null;
   // Flag: set when a teammate:messageWhileIdle has been emitted but sendMessage hasn't
   // started yet. Prevents interruptWithMessage from emitting duplicate events.
   private teammateIdleMessagePending: boolean = false;
@@ -252,6 +266,83 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
   // so finalizeBackgroundDrain() can tell a user stop / supersede (no continuation)
   // apart from an unexpected sub-agent death (auto-continue). Reset each turn.
   private drainExitCause: DrainExitCause = 'resolved';
+  // Handover: once the lead turn is over and only background sub-agents keep the
+  // query open (the drain), interrupting destroys exactly the work the drain
+  // exists for. interruptCurrentTurn() parks the live query as a lease instead
+  // and the follow-up turn adopts it — same subprocess, same running sub-agents,
+  // fresh generator (so its output reaches the UI, which a post-`complete` yield
+  // never could). Query, abort controller and prompt controller park as ONE
+  // lease because they only work together, and a lease always has an owner: an
+  // adopting turn, disposeParkedLease(), or the watchdog below.
+  //
+  // A state machine, not a request flag: the loop moves `requested` to
+  // `accepted` when it actually leaves the drain, and only `accepted` may park.
+  // A bare flag let the request time out after the loop had committed, closing a
+  // query whose sub-agents were still reported running. resolveHandoverPark()
+  // holds the decision. #1269.
+  private handover: {
+    state: HandoverState;
+    /**
+     * Settles requestQueryHandover(). Called on EVERY teardown outcome, with
+     * whether the query was actually parked.
+     */
+    resolveParked: ((parked: boolean) => void) | null;
+  } | null = null;
+  private parkedLease: {
+    query: Query;
+    promptController: PromptStreamController;
+    abortController: AbortController;
+    /**
+     * The tool hooks the parked query's subprocess calls. Part of the lease
+     * because buildSdkOptions binds them as closures over the instance that
+     * existed when the query was created: an adopting turn's own instance is
+     * never wired to anything, so its file edits are recorded on this one. The
+     * adopting turn reads it to decide whether it edited files at all — with a
+     * fresh instance that check saw nothing and skipped createTurnEndSnapshots,
+     * leaving the turn's restore points missing from the file history. #1269.
+     */
+    toolHooksService: AgentToolHooks;
+    generation: number;
+    /**
+     * The session the parking turn ran for. Every disposal exit emits
+     * `drainSettled` and a task update for a session, and `currentSessionId`
+     * cannot serve: it is written only from `system/init` of a query that had
+     * MCP servers, an ADOPTED query never sends `system/init` again, and abort()
+     * clears it — so both emits bailed out on their `!sessionId` guard and the
+     * user watched killed sub-agents run. #1269.
+     */
+    sessionId: string | undefined;
+    /**
+     * Fingerprint of the options the parked query was started with, so a turn
+     * that resolved different ones opens its own query instead. The running
+     * subprocess cannot change the model, effort, thinking mode or tool
+     * restrictions it was spawned with; it would answer from the previous
+     * configuration while the options logged beside it describe the new one — a
+     * divergence nothing downstream can see. The PR states the boundary: a
+     * handover carries a turn over only while the model settings stay put. #1269.
+     */
+    optionsSignature: string;
+    /**
+     * The read still in flight when the loop left the drain. Part of the lease
+     * because the SDK hands every caller the same generator: whoever adopts the
+     * query must consume this promise as its first chunk, or the next message
+     * goes to a promise nobody awaits. #1269.
+     */
+    pendingChunk: Promise<IteratorResult<any>> | null;
+    /**
+     * Terminal task_notifications from the parked turn's drain. Parking skips
+     * finalizeBackgroundDrain, so dropping them would swallow the results of
+     * sub-agents that finished just before the handover. #1269.
+     */
+    terminalNotifications: TaskTerminalNotification[];
+  } | null = null;
+  private static readonly HANDOVER_PARK_TIMEOUT_MS = 5000;
+  private parkedLeaseWatchdog: ReturnType<typeof setTimeout> | null = null;
+  // Identity of the query this provider currently owns. Bumped for every query
+  // it starts AND every lease it adopts; tasks are stamped with it when they
+  // start. A running task carrying any other generation belongs to a query that
+  // is gone — see findForeignRunningTasks(). #1269.
+  private queryGeneration = 0;
 
   // Teammate management: spawning, messaging, lifecycle, config I/O
   private teammateManager: TeammateManager;
@@ -638,20 +729,28 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       this.abortController.abort();
     }
 
-    // Create abort controller for this request
-    this.abortController = new AbortController();
+    // Create abort controller for this request. Kept in a turn-local as well, so
+    // it stays reachable as the query's controller even after a later
+    // sendMessage entry has replaced the field with one of its own. #1269.
+    const turnAbortController = new AbortController();
+    this.abortController = turnAbortController;
 
     // Create tool hooks service for this turn
     // This service manages pre/post hooks, file tagging, and snapshot creation
-    this.toolHooksService = this.createToolHooksService(
+    //
+    // Turn-local as well as an instance field, and reassigned to the lease's
+    // instance on an adoption below — see parkedLease.toolHooksService for why
+    // an adopted query's edits land on the PARKED instance. #1269.
+    let turnToolHooks = this.createToolHooksService(
       workspacePath!,
       sessionId,
       paths.permissionsPath,
       false
     );
+    this.toolHooksService = turnToolHooks;
 
     // Clear edited files tracker for new turn
-    this.toolHooksService.clearEditedFiles();
+    turnToolHooks.clearEditedFiles();
 
     try {
       // Prompt rewriting, system prompt, SDK options, input logging and the
@@ -661,6 +760,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       const {
         options,
         promptInput,
+        initialUserContent,
         transcriptAdapter,
         queryStartTime,
       } = await buildTurnQuery(
@@ -679,7 +779,11 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
           teammateManager: this.teammateManager,
           sessions: this.sessions,
           config: this.config,
-          abortController: this.abortController!,
+          // The controller the SDK actually receives, kept turn-local: a later
+          // sendMessage entry replaces `this.abortController`, so a turn
+          // unwinding after that would hand its lease a controller no query
+          // ever saw — healthy-looking and reaching nothing. #1269.
+          abortController: turnAbortController,
           currentMode: this.currentMode,
           metaAgentAllowedTools: BaseAgentProvider.META_AGENT_ALLOWED_TOOLS,
           publishSdkResult: (result) => {
@@ -691,20 +795,99 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
         { documentContext, sessionId, workspacePath, attachments, paths, prepared },
       );
 
+      // Taken from the options the query is actually created with, meta-agent
+      // restrictions included. A follow-up turn may adopt this query only if its
+      // own options produce the same fingerprint. #1269.
+      state.queryOptionsSignature = buildQueryOptionsSignature(
+        options as Parameters<typeof buildQueryOptionsSignature>[0],
+      );
+
       const queryCallStart = Date.now();
 
-      const leadQuery: AsyncIterable<any> = query({
-        prompt: promptInput as any,
-        options
-      });
+      // Adopt a query parked by a previous turn's handover: the SAME subprocess,
+      // so the background sub-agents still running inside it survive this turn
+      // and their task_notifications land in this generator. Attachments are no
+      // obstacle — they ride in the message, not in the options the process was
+      // started with, which is why the adopting turn pushes the very content
+      // its own first message would have carried. #1269.
+      //
+      // Four behaviours of @anthropic-ai/claude-agent-sdk are load-bearing
+      // here, and none is a documented contract. The dependency is pinned
+      // exactly to 0.3.241 in the root, `runtime` and `electron` package.json,
+      // so a version bump is visible in review — re-verify all four then:
+      //   1. A message written to a live query's prompt stream starts a new
+      //      user turn on it, rather than being rejected because the previous
+      //      turn already produced its `result` — including one whose content is
+      //      image or document blocks rather than text.
+      //   2. The AbortController handed to `query({ options })` governs that
+      //      query's lifetime, so whoever holds it can stop the subprocess.
+      //      Everything the lease does with ownership rests on this.
+      //   3. `streamInput` closes stdin when its input stream ends — an
+      //      unconditional transport.endInput() after the last message. That is
+      //      why the follow-up prompt goes onto the persistent prompt stream
+      //      (promptController.push) instead of a second streamInput call: a
+      //      one-shot stream would shut the pipe the drain still needs.
+      //   4. A `push()` that reports success got the message to the subprocess.
+      //      It really only reports OUR end() of the generator, not the state of
+      //      the pipe, so a transport that died on the SDK side stays unseen and
+      //      the adoption looks final while the message never left the process.
+      //      Deliberately not guarded: never observed, and the one signal that
+      //      would show it, `Query.isClosed()`, is absent from the exported type.
+      const adopted = this.adoptParkedLeaseFor(initialUserContent, state.queryOptionsSignature);
+      if (adopted) {
+        console.log('[CLAUDE-CODE] SUBAGENT_DRAIN: adopting parked query for follow-up turn; background sub-agents preserved');
+        // This turn built its own prompt stream before it knew a lease was
+        // waiting. Nothing was ever written to it and no query holds it, so end
+        // it before taking the lease's — otherwise it stays open for the rest of
+        // the process.
+        this.promptController?.end('handover-unused');
+        this.promptController = adopted.promptController;
+        // Take over the lease's abort controller too: the SDK holds that one,
+        // while this turn's own was never handed to any query, so leaving it in
+        // place would make abort() fire into the void. #1269.
+        this.abortController = adopted.abortController;
+        // Same for the tool hooks. Cleared here, at the start of the adopting
+        // turn, so the snapshot at its end covers its own edits and not the
+        // parked turn's.
+        turnToolHooks = adopted.toolHooksService;
+        turnToolHooks.clearEditedFiles();
+        this.toolHooksService = turnToolHooks;
+        state.adoptedLease = true;
+      }
+      const leadQuery: AsyncIterable<any> = adopted
+        ? (adopted.query as unknown as AsyncIterable<any>)
+        : query({
+          prompt: promptInput as any,
+          options
+        });
 
       this.leadQuery = leadQuery as unknown as Query;
+      // Recorded in the same breath as the query it governs: the lease's on an
+      // adoption, this turn's own otherwise.
+      this.leadQueryAbortController = adopted ? adopted.abortController : turnAbortController;
+      // The query this provider owns changed identity. The tasks that came with
+      // the lease move to the new generation with it — anything else still
+      // running belongs to a query that is gone. #1269.
+      const inheritedGeneration = adopted?.generation;
+      this.queryGeneration++;
+      if (inheritedGeneration !== undefined) {
+        for (const task of this.activeTasks.values()) {
+          if (task.queryGeneration === inheritedGeneration) {
+            task.queryGeneration = this.queryGeneration;
+          }
+        }
+      }
+      if (adopted) {
+        this.releaseAdoptedLease();
+      }
       ClaudeCodeProvider.streamingInstances.add(this);
       this.teammateIdleMessagePending = false;
       // Reset per-turn background-drain state (defensive; also reset in finally).
       this.drainingBackgroundTasks = false;
       this.drainExitCause = 'resolved';
-      this.drainTerminalNotifications = [];
+      // Resume from the parked turn's notifications, so this turn's drain
+      // carries them into the continuation.
+      this.drainTerminalNotifications = adopted ? adopted.terminalNotifications : [];
       this.drainGraceExpired = false;
       this.settledBackgroundTasksThisTurn = false;
       const queryIterator = leadQuery as AsyncIterable<any>;
@@ -804,6 +987,8 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
         // Use manual iteration with Promise.race so interruptWithMessage() can
         // break the loop immediately without waiting for the SDK subprocess.
         const iterator = (queryIterator as AsyncIterable<any>)[Symbol.asyncIterator]();
+        // On an adoption the lease's abandoned read is consumed first. #1269.
+        const readNextChunk = createChunkReader<any>(iterator, adopted?.pendingChunk ?? null);
         let interruptPromise = new Promise<'interrupted'>(resolve => {
           this.interruptResolve = () => resolve('interrupted');
         });
@@ -831,7 +1016,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
             hasRunningTasks: this.hasRunningTasks(),
             hasPendingUserInteraction: this.hasPendingUserInteraction(),
           });
-          const nextPromise = iterator.next();
+          const nextPromise = readNextChunk();
           const raceResult = await raceNextChunkWithStallWatchdog<any>({
             nextPromise,
             interruptPromise,
@@ -840,6 +1025,29 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
           });
 
           if (raceResult.kind === 'interrupted') {
+            if (this.handover?.state === 'requested') {
+              // Leave the drain WITHOUT interrupting; the teardown block parks
+              // the query. The `handover` field explains why this transition is
+              // the commitment. #1269.
+              this.handover.state = 'accepted';
+              console.log('[CLAUDE-CODE] SUBAGENT_DRAIN: handing the live query to the follow-up turn; sub-agents keep running');
+              this.drainExitCause = 'handover';
+              // Disarm the grace timer HERE, at the commitment, not in the
+              // teardown block: between this break and that block lie a dozen
+              // awaits (post-loop teardown has been measured at 152s in this
+              // repo). A timer firing in that window calls promptController.end()
+              // while the park still looks decidable, so the adoption would fail
+              // at push() and kill the very sub-agents this handover preserves.
+              // #1269.
+              this.clearPromptEndTimer();
+              // This read belongs to the query, not to this turn, so it goes with
+              // the lease. Same no-op catch as the 'stalled' branch below: nobody
+              // may end up awaiting it (disposed lease, or the adopting turn
+              // throws first), and it stays awaitable regardless.
+              void nextPromise.catch(() => {});
+              state.handoverPendingChunk = nextPromise;
+              break;
+            }
             console.log('[CLAUDE-CODE] Interrupt signal received, breaking streaming loop');
             this.drainExitCause = 'interrupted';
             break;
@@ -1400,6 +1608,10 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
             // synchronously while handling `complete` to decide whether to end the
             // session; the flag must already be set or the deferral (and any later
             // continuation) is lost. See NIM-1344 / GitHub #732 (High).
+            // Before that decision, drop tasks whose query is gone; left
+            // registered they would open a drain that can never settle. #1269.
+            this.reapForeignRunningTasks(sessionId);
+
             const willDrainSubagents = shouldDeferTeardownForSubagents(this.hasRunningTasks());
             if (willDrainSubagents) {
               this.drainingBackgroundTasks = true;
@@ -1495,7 +1707,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       // streamInput. Skip if the query was interrupted — after interrupt() the
       // transport is dead and streamInput will always fail. Messages stay queued
       // for the finally block to re-trigger via a fresh sendMessage.
-      while (this.teammateManager.hasPendingTeammateMessages() && this.leadQuery && !this.wasInterrupted) {
+      while (this.teammateManager.hasPendingTeammateMessages() && this.leadQuery && !this.wasInterrupted && !this.handover) {
         const nextMsg = this.teammateManager.drainNextTeammateMessage();
         if (!nextMsg) break;
 
@@ -1622,10 +1834,15 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       // Kept for finalizeBackgroundDrain: after a drain, the subprocess must be
       // closed (not just stdin-ended) or it runs a doomed continuation turn
       // against the torn-down control channel and leaks. NIM-1470.
-      const queryForDrainCleanup = this.leadQuery;
-      this.leadQuery = null;
+      // A handover parks these as a lease instead of tearing them down, so the
+      // query and its controller come out together as the recorded pair. #1269.
+      const { query: queryForDrainCleanup, abortController: abortControllerForLease } =
+        this.takeOwnedQueryParts();
       ClaudeCodeProvider.streamingInstances.delete(this);
       this.abortController = null;
+      // Captured before the reset below: the reap decision a few lines down
+      // needs to know this turn was interrupted, and by then the field is gone.
+      const interruptedThisTurn = this.wasInterrupted;
       this.wasInterrupted = false;
       this.interruptResolve = null;
       // End the persistent prompt stream so the SDK's streamInput generator
@@ -1633,12 +1850,24 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       // turns where the grace timer never armed (no result chunk received,
       // e.g. error path) or the controller is still open for some reason.
       // Idempotent inside the controller. Also clear the grace timer so it
-      // can't fire after we're gone.
-      if (this.promptEndTimer) {
-        clearTimeout(this.promptEndTimer);
-        this.promptEndTimer = null;
-      }
-      if (this.promptController) {
+      // can't fire after we're gone. (A handover exit already disarmed it; this
+      // covers every other exit.)
+      this.clearPromptEndTimer();
+      const parkedThisTurn = this.settleHandover({
+        query: queryForDrainCleanup,
+        promptController: this.promptController,
+        abortController: abortControllerForLease,
+        toolHooksService: turnToolHooks,
+        exitCause: this.drainExitCause,
+        pendingChunk: state.handoverPendingChunk,
+        sessionId,
+        optionsSignature: state.queryOptionsSignature,
+      });
+      if (parkedThisTurn) {
+        // The lease owns the prompt controller now; ending it here would close
+        // the stdin the parked sub-agents are running on.
+        this.promptController = null;
+      } else if (this.promptController) {
         this.promptController.end('sendMessage-finally');
         this.promptController = null;
       }
@@ -1648,8 +1877,26 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       // subagents:drainSettled handler's isLeadBusy() check reads false and can
       // actually release the deferred session. Reads drainExitCause /
       // drainingBackgroundTasks, so reset those only afterward. NIM-1344 / #732.
-      this.finalizeBackgroundDrain(sessionId, queryForDrainCleanup);
-      this.drainingBackgroundTasks = false;
+      // Skipped when the query was parked: nothing to close, nothing to reap.
+      if (!parkedThisTurn) {
+        this.finalizeBackgroundDrain(sessionId, queryForDrainCleanup);
+      }
+      this.reapTasksOfEndedAdoptedTurn(
+        { query: queryForDrainCleanup, abortController: abortControllerForLease, sessionId },
+        {
+          adoptedLease: state.adoptedLease,
+          parkedForHandover: parkedThisTurn,
+          wasDraining: this.drainingBackgroundTasks,
+          wasInterrupted: interruptedThisTurn,
+        },
+      );
+      // A parked query keeps its sub-agents running: only this TURN ended, the
+      // drain did not. Clearing the flag here would claim the opposite for the
+      // whole handover window. The adopting turn resets it for itself, and
+      // disposeParkedLease() clears it when no turn ever adopts. #1269.
+      if (!parkedThisTurn) {
+        this.drainingBackgroundTasks = false;
+      }
       this.drainExitCause = 'resolved';
       this.drainTerminalNotifications = [];
       this.drainGraceExpired = false;
@@ -1657,7 +1904,11 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
 
       // Note: markMessagesAsHidden is reset at the START of sendMessage to prevent race conditions
 
-      this.handlePostLeadTurnTeammateState(sessionId, hideMessages);
+      // Skipped on a handover: this turn has not really ended, and the teammate
+      // path delivers its own message from interruptWithMessage(). #1269.
+      if (!parkedThisTurn) {
+        this.handlePostLeadTurnTeammateState(sessionId, hideMessages);
+      }
       this.emitPreparedStreamClosedContinuation(sessionId);
       this.finishStreamClosedTurnState();
 
@@ -1683,13 +1934,15 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
     // the for-await is mid-iteration -- if we don't end the controller here,
     // the SDK's streamInput stays blocked on its endPromise and the for-await
     // can hang waiting for chunks that never come from the dead transport.
-    if (this.promptEndTimer) {
-      clearTimeout(this.promptEndTimer);
-      this.promptEndTimer = null;
-    }
+    this.clearPromptEndTimer();
     if (this.promptController) {
       this.promptController.end('abort');
     }
+
+    // A parked lease holds a query the user cannot see and super.abort() cannot
+    // reach — its abort controller is the lease's, not this.abortController.
+    // Stop means stop, so tear it down here. #1269.
+    this.disposeParkedLease('abort');
 
     // Call base class abort (handles abortController and rejectAllPendingPermissions)
     super.abort();
@@ -1809,14 +2062,35 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
    * that abort is a no-op, so the caller has to clear the session's live state
    * itself or a stuck-running session strands its queue forever (NIM-2434).
    */
-  async interruptCurrentTurn(): Promise<InterruptTurnResult> {
+  async interruptCurrentTurn(followUp?: TurnHandoverCandidate | null): Promise<InterruptTurnResult> {
     if (!this.leadQuery) {
       console.log('[CLAUDE-CODE] interruptCurrentTurn: no active lead query, falling back to abort');
       const outcome = await super.interruptCurrentTurn();
       return { ...outcome, hadActiveTurn: false };
     }
 
+    // With only background sub-agents keeping the query open there is no lead
+    // generation to interrupt — an interrupt would merely destroy them and lose
+    // their results. Park the query for the follow-up turn instead; `followUp`
+    // is what proves such a turn is actually coming. #1269.
+    if (await this.requestQueryHandover('interruptCurrentTurn', followUp)) {
+      return { method: 'handover' };
+    }
+
+    // The handover request can outlive the turn it was made against: the wait
+    // ends when the teardown settles it, and by then the `finally` has nulled
+    // leadQuery. Interrupting anyway would set wasInterrupted for a turn that no
+    // longer exists — it survives into the NEXT turn's finally and suppresses
+    // that turn's teammate delivery. `hadActiveTurn: false` instead lets the
+    // caller force the session idle, so a prompt waiting behind `session-busy`
+    // can dispatch. #1269.
+    if (!this.leadQuery) {
+      console.warn('[CLAUDE-CODE] interruptCurrentTurn: the turn ended while the handover was in flight; nothing left to interrupt');
+      return { method: 'interrupt', hadActiveTurn: false };
+    }
+
     console.log('[CLAUDE-CODE] interruptCurrentTurn: interrupting active lead query');
+    this.abandonHandoverForInterrupt('interruptCurrentTurn');
     this.wasInterrupted = true;
 
     // Resolve the interrupt promise so the Promise.race in the streaming loop
@@ -1846,6 +2120,359 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
     }
 
     return { method: 'interrupt' };
+  }
+
+  /**
+   * Ask the streaming loop to leave its drain WITHOUT interrupting, so the
+   * `finally` block parks the live query as a lease for the follow-up turn.
+   *
+   * Returns false when there is nothing to hand over, or when the loop did not
+   * reach its finally in time — the caller then falls back to a real interrupt.
+   * Waiting is not cosmetic: callers dispatch the follow-up turn as soon as this
+   * resolves, and a turn that starts before the park would open a second query
+   * while the first one has no owner. #1269.
+   */
+  private async requestQueryHandover(
+    caller: string,
+    followUp: TurnHandoverCandidate | null | undefined,
+  ): Promise<boolean> {
+    if (!this.leadQuery || !this.drainingBackgroundTasks) return false;
+    // Only park when the adopting turn is already known to exist and to be
+    // adoptable. Parking speculatively meant every case where no adopting turn
+    // followed had to be caught afterwards. #1269.
+    if (followUp?.canAdoptQuery !== true) return false;
+    // A handover already in flight owns the loop's exit; a second requester
+    // would overwrite its resolver and leave it waiting for a settle that never
+    // comes. Let it fall back to a real interrupt instead.
+    if (this.handover) return false;
+
+    console.log(`[CLAUDE-CODE] ${caller}: only background sub-agents hold the query open; handing it to the follow-up turn instead of interrupting`);
+    let settle!: (parked: boolean) => void;
+    const parked = new Promise<boolean>(resolve => { settle = resolve; });
+    this.handover = { state: 'requested', resolveParked: settle };
+    // Wake the loop's race so it leaves the drain now instead of waiting for the
+    // next chunk — a quiet sub-agent can be silent for minutes.
+    if (this.interruptResolve) {
+      this.interruptResolve();
+      this.interruptResolve = null;
+    }
+    const raced = await Promise.race([
+      parked.then(didPark => ({ timedOut: false, didPark })),
+      new Promise<{ timedOut: true; didPark: false }>(resolve =>
+        setTimeout(() => resolve({ timedOut: true, didPark: false }),
+          ClaudeCodeProvider.HANDOVER_PARK_TIMEOUT_MS)),
+    ]);
+
+    if (!raced.timedOut) {
+      if (!raced.didPark) {
+        console.warn(`[CLAUDE-CODE] ${caller}: the turn ended without parking (cause=${this.drainExitCause}); falling back to interrupt`);
+      }
+      return raced.didPark;
+    }
+
+    // Timed out. Whether that means "fall back" depends on how far the loop got:
+    // once it ACCEPTED, interrupting now would destroy exactly the sub-agents
+    // the handover preserves, and post-loop teardown routinely outlasts this
+    // budget. The teardown always settles the promise, so waiting terminates.
+    if (this.handover?.state === 'accepted') {
+      console.warn(`[CLAUDE-CODE] ${caller}: park timeout elapsed but the loop already accepted the handover; waiting for teardown instead of interrupting`);
+      return await parked;
+    }
+
+    console.warn(`[CLAUDE-CODE] ${caller}: handover did not park in time; falling back to interrupt`);
+    if (this.handover) this.handover = { state: 'abandoned', resolveParked: null };
+    return false;
+  }
+
+  /**
+   * A second interrupt is about to kill the query an earlier handover is still
+   * waiting to park. Post-loop teardown has been measured at 152s here, and a
+   * request arriving inside that window is turned away by the single-slot guard
+   * above, so its caller falls back to a real interrupt on a query the teardown
+   * still intends to hand on. Parking it then leaves the lease holding a dead
+   * transport that `push()` reports success on anyway (SDK assumption 4 at the
+   * adoption site) — the follow-up turn adopts and the user's message is gone
+   * without a trace, unnoticed because `wasInterrupted` is reset in the
+   * `finally` before the park is decided and the abort controller never fired.
+   * Marking the handover abandoned routes settleHandover() through its teardown
+   * branch instead; the waiter's resolver stays in place because it is still
+   * owed an answer. #1269.
+   */
+  private abandonHandoverForInterrupt(caller: string): void {
+    if (!this.handover || this.handover.state === 'abandoned') return;
+    console.warn(`[CLAUDE-CODE] ${caller}: interrupting while a handover was ${this.handover.state}; abandoning the park so the query's sub-agents are reaped`);
+    this.handover = { state: 'abandoned', resolveParked: this.handover.resolveParked };
+  }
+
+  /** Release the query this provider owns with its abort controller, clearing both slots. */
+  private takeOwnedQueryParts(): { query: Query | null; abortController: AbortController | null } {
+    const query = this.leadQuery;
+    const abortController = this.leadQueryAbortController;
+    this.leadQuery = null;
+    this.leadQueryAbortController = null;
+    return { query, abortController };
+  }
+
+  /**
+   * Teardown half of the handover: park the query as a lease, or leave it to
+   * normal teardown, and settle whoever is waiting on the answer — on every
+   * outcome, carrying whether the park really happened, so a waiter can never
+   * block on a park that was decided against. resolveHandoverPark() holds the
+   * whole decision. #1269.
+   *
+   * @returns whether the query was parked; the caller keeps the prompt
+   *   controller alive in that case, because the lease now owns it.
+   */
+  private settleHandover(parts: {
+    query: Query | null;
+    promptController: PromptStreamController | null;
+    abortController: AbortController | null;
+    toolHooksService: AgentToolHooks;
+    exitCause: DrainExitCause;
+    pendingChunk?: Promise<IteratorResult<any>> | null;
+    sessionId?: string | undefined;
+    optionsSignature?: string;
+  }): boolean {
+    const decision = resolveHandoverPark({
+      state: this.handover?.state ?? null,
+      exitCause: parts.exitCause,
+      hasLiveQuery: !!parts.query,
+      hasPromptController: !!parts.promptController,
+      promptStreamEnded: parts.promptController?.isEnded() === true,
+      hasAbortController: !!parts.abortController,
+      abortSignalFired: parts.abortController?.signal.aborted === true,
+    });
+
+    let parked = false;
+    if (decision === 'park') {
+      // Ending the prompt stream, aborting or closing here would kill the
+      // background sub-agents this handover exists to preserve. The assertions
+      // restate for the type checker what 'park' already guarantees.
+      this.parkedLease = {
+        query: parts.query!,
+        promptController: parts.promptController!,
+        abortController: parts.abortController!,
+        toolHooksService: parts.toolHooksService,
+        generation: this.queryGeneration,
+        sessionId: parts.sessionId,
+        optionsSignature: parts.optionsSignature ?? '',
+        pendingChunk: parts.pendingChunk ?? null,
+        terminalNotifications: this.drainTerminalNotifications,
+      };
+      this.armParkedLeaseWatchdog();
+      parked = true;
+    } else if (parts.exitCause === 'handover') {
+      // The loop committed to a handover, but the park could not happen. Leaving
+      // the cause at 'handover' would run the normal teardown with
+      // classifyDrainOutcome('handover'), which closes the query while reporting
+      // its sub-agents as still running — the pinned "Thinking…" from a second
+      // door. Name the exit for what it was so they are reaped. #1269.
+      console.warn(`[CLAUDE-CODE] SUBAGENT_DRAIN: the loop left the drain for a handover but the lease could not be parked (query=${!!parts.query} promptController=${!!parts.promptController} promptStreamEnded=${parts.promptController?.isEnded() === true} abortController=${!!parts.abortController} aborted=${parts.abortController?.signal.aborted === true}); tearing the query down as an interrupt instead`);
+      this.drainExitCause = 'interrupted';
+    }
+
+    const resolveParked = this.handover?.resolveParked ?? null;
+    this.handover = null;
+    resolveParked?.(parked);
+    return parked;
+  }
+
+  /**
+   * Take the parked lease for this turn, but only if the turn's prompt actually
+   * lands on it. The delivery IS the adoption: going ahead after a failed push
+   * would run the turn on a query that never received the user's message — lost
+   * in silence, the failure class this whole change exists to remove. Disposing
+   * instead is safe only because nothing has been committed yet here: the turn's
+   * own query, prompt stream and abort controller are all still untouched.
+   *
+   * The slot is cleared by the caller once it has taken ownership, not here:
+   * clearing at read time left a window in which the lease was referenced by
+   * nothing but a local, so a throw before the new owner was wired up lost the
+   * query and its sub-agents outright. #1269.
+   */
+  private adoptParkedLeaseFor(
+    content: string | ContentBlockParam[],
+    optionsSignature: string,
+  ): ClaudeCodeProvider['parkedLease'] {
+    const candidate = this.parkedLease;
+    if (!candidate) return null;
+
+    if (candidate.optionsSignature !== optionsSignature) {
+      console.warn(`[CLAUDE-CODE] SUBAGENT_DRAIN: the follow-up turn runs with different query options than the parked query (parked="${candidate.optionsSignature}" now="${optionsSignature}"); disposing the lease and opening a fresh query so the new settings actually apply`);
+      this.disposeParkedLease('follow-up turn changed the query options', false);
+      return null;
+    }
+
+    if (!candidate.promptController.push(buildInjectedUserMessage(content))) {
+      console.warn('[CLAUDE-CODE] SUBAGENT_DRAIN: the parked prompt stream was closed before the follow-up prompt could be delivered; disposing the lease and opening a fresh query so the message still arrives');
+      this.disposeParkedLease('prompt stream closed before adoption', false);
+      return null;
+    }
+
+    return candidate;
+  }
+
+  /** Hand the lease slot over to the turn that has just taken ownership. */
+  private releaseAdoptedLease(): void {
+    this.clearParkedLeaseWatchdog();
+    this.parkedLease = null;
+  }
+
+  /** Give the parked lease an expiry date; see resolveParkedLeaseMaxAgeMs(). */
+  private armParkedLeaseWatchdog(): void {
+    this.clearParkedLeaseWatchdog();
+    this.parkedLeaseWatchdog = setTimeout(() => {
+      this.parkedLeaseWatchdog = null;
+      this.disposeParkedLease('never adopted');
+    }, resolveParkedLeaseMaxAgeMs());
+  }
+
+  private clearParkedLeaseWatchdog(): void {
+    if (this.parkedLeaseWatchdog) {
+      clearTimeout(this.parkedLeaseWatchdog);
+      this.parkedLeaseWatchdog = null;
+    }
+  }
+
+  /**
+   * Report and reap running tasks that belong to a query this provider no
+   * longer owns. Loud on purpose: reaching this means some exit path closed a
+   * query without reaping its tasks, and the log line names what to fix. #1269.
+   */
+  private reapForeignRunningTasks(sessionId: string | undefined): void {
+    const foreign = findForeignRunningTasks(this.activeTasks.values(), this.queryGeneration);
+    if (foreign.length === 0) return;
+
+    for (const task of foreign) {
+      console.warn(`[CLAUDE-CODE] SUBAGENT_TASK: task ${task.taskId ?? 'unknown'} ("${task.description || 'unknown task'}") is still running under query generation ${task.queryGeneration ?? 'none'} while this turn owns generation ${this.queryGeneration}; its query is gone, so no notification can settle it. Marking stopped.`);
+      task.status = 'stopped';
+    }
+    this.emitTaskUpdate(sessionId).catch(() => {});
+  }
+
+  /**
+   * Tear down a parked lease that no turn will adopt. Every exit that ends a
+   * handover without an adopting turn routes through here: a follow-up prompt
+   * that cannot adopt, abort(), destroy(), and the expiry watchdog. #1269.
+   */
+  private disposeParkedLease(reason: string, announceDrainSettled = true): void {
+    this.clearParkedLeaseWatchdog();
+    const lease = this.parkedLease;
+    if (!lease) return;
+    this.parkedLease = null;
+
+    console.warn(`[CLAUDE-CODE] SUBAGENT_DRAIN: disposing parked query (${reason}); its background sub-agents go with it`);
+    this.tearDownOwnedQuery(lease, `parked query disposed (${reason})`);
+
+    // The park left the drain flag standing because the sub-agents were still
+    // running. They just died with the query, so withdraw the claim here —
+    // otherwise the next turn defers its teardown for work that is gone.
+    this.drainingBackgroundTasks = false;
+
+    // The park had skipped finalizeBackgroundDrain, so this is the last exit and
+    // nobody else announces it; consumers waiting on the deferred session end
+    // (see MessageStreamingHandler) hang otherwise. Suppressed when the caller
+    // is starting a turn of its own right now: that turn owns the end. #1269.
+    if (announceDrainSettled) {
+      this.emitDrainSettled(lease.sessionId, `parked query disposed (${reason})`);
+    }
+  }
+
+  /**
+   * Announce that the background drain has finished for this session. Kept in
+   * one place because every exit that ends a drain must announce it the same
+   * way: the consumer defers the session end while sub-agents run and only
+   * releases it on this event. Teammate work still in flight keeps the session
+   * alive on its own path (teammates:allCompleted), so it suppresses the
+   * release here. See #732 and #1269.
+   */
+  private emitDrainSettled(sessionId: string | undefined, reason: string): void {
+    if (!sessionId) return;
+    if (
+      this.teammateManager.hasActiveTeammates()
+      || this.teammateManager.hasPendingTeammateMessages()
+    ) {
+      return;
+    }
+    console.log(`[CLAUDE-CODE] SUBAGENT_DRAIN: drain settled (${reason}); releasing deferred session end for ${sessionId}`);
+    this.emit('subagents:drainSettled', { sessionId });
+  }
+
+  /**
+   * The last step of a turn's teardown: a turn that adopted a lease inherited
+   * background tasks older than itself, and see shouldReapAdoptedTasks() for
+   * when nothing else reaps them. Reads `drainingBackgroundTasks`, so the caller
+   * runs it before resetting the per-turn drain state. #1269.
+   */
+  private reapTasksOfEndedAdoptedTurn(
+    parts: {
+      query: Query | null;
+      abortController: AbortController | null;
+      sessionId: string | undefined;
+    },
+    // `wasDraining` and `wasInterrupted` are passed in, not read from `this`:
+    // the finally resets both around this call, so reading them here would make
+    // correctness depend on that ordering. #1269.
+    turn: {
+      adoptedLease: boolean;
+      parkedForHandover: boolean;
+      wasDraining: boolean;
+      wasInterrupted: boolean;
+    },
+  ): void {
+    const reap = shouldReapAdoptedTasks({
+      adoptedLease: turn.adoptedLease,
+      parkedForHandover: turn.parkedForHandover,
+      wasDraining: turn.wasDraining,
+      ownsQuery: !!parts.query,
+      // The interrupt leaves no owner for this query, and it has already
+      // stopped the tasks that would otherwise ask for the teardown. #1269.
+      wasInterrupted: turn.wasInterrupted,
+      // With nothing left running there is nothing to reap, and the query is
+      // healthy: tearing it down would cold-start the subprocess after every
+      // handover turn. #1269.
+      hasRunningTasks: this.hasRunningTasks(),
+    });
+    if (!reap) return;
+    this.tearDownOwnedQuery(parts, 'adopted turn ended outside a drain');
+  }
+
+  /**
+   * Close a query this provider owns and reap the background tasks that were
+   * running inside it. The reap is the point: those tasks ran in the subprocess
+   * being closed, so their terminal `task_notification` can never arrive — left
+   * registered they pin the next turn in a drain that can never settle, same
+   * reasoning as abort(). #1269.
+   */
+  private tearDownOwnedQuery(
+    parts: {
+      query?: Query | null;
+      promptController?: PromptStreamController | null;
+      abortController?: AbortController | null;
+      /**
+       * The session the torn-down query belonged to. Passed in because
+       * `currentSessionId` is routinely empty on the paths that reach here, and
+       * the task update would then never reach the UI. #1269.
+       */
+      sessionId?: string | undefined;
+    },
+    reason: string,
+  ): void {
+    try {
+      parts.promptController?.end(`query-teardown:${reason}`);
+    } catch { /* best effort — the controller may already be closed */ }
+    try {
+      parts.abortController?.abort();
+    } catch { /* best effort */ }
+    try {
+      parts.query?.close?.();
+    } catch { /* best effort — the process may already have exited */ }
+
+    const stranded = reapRunningTasks(this.activeTasks.values());
+    if (stranded.length > 0) {
+      console.warn(`[CLAUDE-CODE] SUBAGENT_TASK: ${reason} left ${stranded.length} running task(s) with no live query; marking stopped. tasks=[${stranded.join(', ')}]`);
+      this.emitTaskUpdate(parts.sessionId ?? this.currentSessionId).catch(() => {});
+    }
   }
 
   /**
@@ -1883,11 +2510,49 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       return;
     }
 
-    // Interrupt the lead query. After interrupt(), the transport is dead and
-    // streamInput will always fail. Set wasInterrupted so the while loop after
-    // the for-await skips streamInput and lets the finally block re-trigger
-    // delivery via a fresh sendMessage call.
+    // While only background sub-agents hold the query open, interrupting
+    // destroys them. Hand the query over and deliver the teammate message
+    // through the idle path instead. The delivery has to happen here: the
+    // finally block skips handlePostLeadTurnTeammateState() on a handover, and
+    // the lease would sit unclaimed — which is why a park is only requested once
+    // something is known to be waiting. Asking rather than draining leaves the
+    // batch where the interrupt path below looks for it, and nothing can take it
+    // in the meantime: the other two consumers (the streamInput loop after the
+    // drain, and handlePostLeadTurnTeammateState in the `finally`) both stand
+    // down for a handover, and `this.handover` is set before this method first
+    // yields. The follow-up turn is this provider's own doing (message in hand,
+    // no attachments), so the candidate is stated directly rather than looked
+    // up. #1269.
+    if (!this.teammateManager.hasPendingTeammateMessages()) return;
+
+    if (await this.requestQueryHandover('interruptWithMessage', { canAdoptQuery: true })) {
+      const parkedBatch = this.drainAndFormatPendingTeammateMessages();
+      if (!parkedBatch) {
+        console.warn('[CLAUDE-CODE] interruptWithMessage: the query was parked but the teammate queue came up empty; nothing will claim the lease before its watchdog');
+        return;
+      }
+      this.emitTeammateMessageWhileIdle(parkedBatch.formattedMessage);
+      return;
+    }
+
+    // The handover wait can end after the turn's `finally` has run: nothing left
+    // to interrupt, and the finally may or may not have re-delivered the queue
+    // already — whoever finds the batch still in it delivers it. #1269.
+    if (!this.leadQuery) {
+      const lateBatch = this.drainAndFormatPendingTeammateMessages();
+      if (lateBatch) {
+        console.warn('[CLAUDE-CODE] interruptWithMessage: the turn ended while the handover was in flight; delivering the teammate message through the idle path');
+        this.emitTeammateMessageWhileIdle(lateBatch.formattedMessage);
+      }
+      return;
+    }
+
+    // No handover: interrupt the lead query. After interrupt(), the transport is
+    // dead and streamInput will always fail. Set wasInterrupted so the while
+    // loop after the for-await skips streamInput; the batch is still queued, so
+    // the finally block re-triggers delivery via a fresh sendMessage call.
     console.log('[CLAUDE-CODE] interruptWithMessage: interrupting active lead query');
+    this.abandonHandoverForInterrupt('interruptWithMessage');
     this.wasInterrupted = true;
 
     // Resolve the interrupt promise FIRST so the Promise.race in the streaming
@@ -2060,7 +2725,11 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
     });
   }
 
-  private drainAndFormatPendingTeammateMessages(): { formattedMessage: string; summaries: string; count: number } | null {
+  private drainAndFormatPendingTeammateMessages(): {
+    formattedMessage: string;
+    summaries: string;
+    count: number;
+  } | null {
     const pendingMessages: TeammateToLeadMessage[] = [];
     while (this.teammateManager.hasPendingTeammateMessages()) {
       const message = this.teammateManager.drainNextTeammateMessage();
@@ -2099,6 +2768,11 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
   destroy(): void {
     console.log('[CLAUDE-CODE] Destroying provider');
 
+    // No turn will ever adopt a lease parked on a provider that is going away.
+    // super.destroy() calls abort(), which disposes it too — this is here so the
+    // ordering is explicit rather than incidental. #1269.
+    this.disposeParkedLease('provider destroyed');
+
     // Clean up permission service
     if (this.permissionService) {
       this.permissionService.clearSessionCache();
@@ -2134,6 +2808,23 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
    */
   public isLeadBusy(): boolean {
     return this.leadQuery !== null || this.teammateIdleMessagePending;
+  }
+
+  /**
+   * True while this provider holds a parked query for a follow-up turn on
+   * `sessionId` that has been promised but has not started yet.
+   *
+   * A handover deliberately leaves the session idle: `interruptCurrentTurn`
+   * reports `'handover'`, the caller forces the session out of `running` so the
+   * waiting prompt can dispatch, and only that prompt's `startSession()` closes
+   * the gap again. In between an IPC round trip, a queue pass and a window
+   * lookup, a session that is idle in the state manager while a live subprocess
+   * and a promised turn still belong to it — so "the session is not active"
+   * does not mean "the session is over" here, and anything delivered in that
+   * window must not be dropped as if it were. #1269.
+   */
+  public hasParkedLeaseForSession(sessionId: string): boolean {
+    return this.parkedLease !== null && this.parkedLease.sessionId === sessionId;
   }
 
   /**
@@ -2249,6 +2940,14 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
     }
   }
 
+  /** Disarm the drain grace timer so it cannot end the prompt stream later. */
+  private clearPromptEndTimer(): void {
+    if (this.promptEndTimer) {
+      clearTimeout(this.promptEndTimer);
+      this.promptEndTimer = null;
+    }
+  }
+
   /** True if any tracked SDK-native sub-agent task is still running. */
   private hasRunningTasks(): boolean {
     return computeHasRunningTasks(this.activeTasks.values());
@@ -2345,14 +3044,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
     // alive (that path ends it via teammates:allCompleted). Emitted from the
     // finally block AFTER leadQuery is nulled, so the handler's isLeadBusy() check
     // reads false. See NIM-1344 / GitHub #732 (High).
-    if (
-      sessionId
-      && !this.teammateManager.hasActiveTeammates()
-      && !this.teammateManager.hasPendingTeammateMessages()
-    ) {
-      console.log(`[CLAUDE-CODE] SUBAGENT_DRAIN: drain settled (cause=${this.drainExitCause}); releasing deferred session end for ${sessionId}`);
-      this.emit('subagents:drainSettled', { sessionId });
-    }
+    this.emitDrainSettled(sessionId, `cause=${this.drainExitCause}`);
   }
 
   /** Handle system task chunks (task_started, task_progress, task_notification). */
@@ -2364,6 +3056,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       draining: this.drainingBackgroundTasks,
       graceExpired: this.drainGraceExpired,
       notifications: this.drainTerminalNotifications,
+      queryGeneration: this.queryGeneration,
       log: (message) => console.log(message),
     });
     if (changed) this.emitTaskUpdate(sessionId).catch(() => {});
