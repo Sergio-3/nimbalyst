@@ -258,8 +258,8 @@ export function buildQueryOptionsSignature(options: {
     prompt === undefined
       ? ''
       : typeof prompt === 'string'
-        ? `raw ${prompt}`
-        : `preset ${prompt.type ?? ''} ${prompt.preset ?? ''} ${prompt.append ?? ''}`;
+        ? `raw\u0000${prompt}`
+        : `preset\u0000${prompt.type ?? ''}\u0000${prompt.preset ?? ''}\u0000${prompt.append ?? ''}`;
   const promptHash = promptSource
     ? createHash('sha256').update(promptSource).digest('hex').slice(0, 16)
     : '';
