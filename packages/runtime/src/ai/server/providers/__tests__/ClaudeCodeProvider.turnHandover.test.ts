@@ -48,10 +48,49 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: (args: unknown) => sdkQuery(args),
 }));
 
+/**
+ * Every `backgroundDrain` value the provider published to session metadata, in
+ * order. That flag is the renderer's only signal that a session is working with
+ * no turn of its own — the send-now button and the session row both read it.
+ */
+const published = vi.hoisted(() => ({ drain: [] as boolean[] }));
+/**
+ * What the session row actually holds. The provider builds the whole blob
+ * itself (`{...currentMetadata, ownField}`) and hands it over, so the store
+ * replaces rather than merges — and a writer that drops a key drops it for
+ * everyone. Keeping the state here is what makes the difference between
+ * "published once" and "still readable" visible; a mock returning a fresh `{}`
+ * from `get()` can only ever show the former.
+ */
+const store = vi.hoisted(() => ({
+  metadata: {} as Record<string, unknown>,
+  /**
+   * Set to hold the next `get()` open. Every writer here is read-modify-write
+   * and every call site is fire-and-forget, so two of them overlapping is
+   * ordinary operation, not a contrived race — pausing one read is how a test
+   * pins that ordering instead of hoping for it.
+   */
+  gate: null as null | Promise<void>,
+}));
 vi.mock('../../../../storage/repositories/AISessionsRepository', () => ({
   AISessionsRepository: {
-    get: async () => ({ metadata: {} }),
-    updateMetadata: async () => {},
+    get: async () => {
+      // Snapshot before waiting: the point of the gate is a reader that holds a
+      // now-stale blob, which is exactly what it will write back.
+      const snapshot = { metadata: store.metadata };
+      const gate = store.gate;
+      if (gate) {
+        store.gate = null; // one reader only; everyone after it runs unimpeded
+        await gate;
+      }
+      return snapshot;
+    },
+    updateMetadata: async (_sessionId: string, patch: { metadata?: Record<string, unknown> }) => {
+      if (typeof patch.metadata?.backgroundDrain === 'boolean') {
+        published.drain.push(patch.metadata.backgroundDrain as boolean);
+      }
+      if (patch.metadata) store.metadata = { ...patch.metadata };
+    },
   },
 }));
 
@@ -444,5 +483,88 @@ describe('ClaudeCodeProvider send-now during a sub-agent drain', () => {
     cli[0].emit({ type: 'system', subtype: 'task_notification', task_id: 'sweep', status: 'completed', summary: 'swept' });
     await turnB.done;
     fs.rmSync(dir, { recursive: true, force: true });
+  }, 20_000);
+
+  // The parked turn's teardown published `backgroundDrain: false` — the turn was
+  // over, so the per-turn flag was reset and mirrored out. But the sub-agents it
+  // was reporting keep running inside the parked query, and that claim was the
+  // renderer's only reason to show anything at all. Between the handover and the
+  // adopting turn the session read as having nothing to do. #1269.
+  it('keeps reporting background work while the handed-over query is parked', async () => {
+    published.drain.length = 0;
+    const cli = fakeCliFleet();
+    const provider = new ClaudeCodeProvider();
+    const state = internals(provider);
+
+    const turnA = await runToDrain(provider, () => cli[0]);
+    await waitFor(() => published.drain.at(-1) === true, 'the drain to be published');
+
+    await expect(provider.interruptCurrentTurn({ canAdoptQuery: true }))
+      .resolves.toEqual({ method: 'handover' });
+    await turnA.done;
+
+    expect(state.parkedLease).not.toBeNull();
+    expect(state.activeTasks.get('sweep')?.status).toBe('running');
+    // The teardown publishes fire-and-forget, so a withdrawal would land after
+    // the turn's own promise. Settle before reading, or the assertion passes on
+    // a write that has merely not happened yet.
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(published.drain.at(-1)).toBe(true);
+
+    // And the claim is withdrawn when the lease dies with nobody to adopt it,
+    // so a session that really has stopped does not keep the indicator.
+    provider.abort();
+    await waitFor(() => published.drain.at(-1) === false, 'the disposal to withdraw it');
+  }, 20_000);
+
+  // Publishing the flag once is not the same as the renderer being able to read
+  // it. Six writers update this session's metadata; each reads the blob, adds
+  // its own field and writes the whole thing back, so any writer that does not
+  // carry `backgroundDrain` forward silently reverts it to the pre-drain value.
+  // `emitTaskUpdate` carries it (and says why); `handleSystemInit`,
+  // `emitTodoUpdate`, `emitTaskListUpdate` and `maybeApplyDefaultSessionPhase`
+  // do not. The revert then sticks: emitBackgroundDrainUpdate() early-returns
+  // while `publishedBackgroundDrain` still claims the value is out there, so no
+  // correction and no reload event ever follow.
+  //
+  // Observed as the send-now light standing red for 87 seconds while the
+  // handover was in fact safe, and the session row reading idle through the
+  // same window — two independent readers of the one field. #1269.
+  it('keeps backgroundDrain readable when another writer overlaps the drain update', async () => {
+    published.drain.length = 0;
+    store.metadata = {};
+    store.gate = null;
+    const cli = fakeCliFleet();
+    const provider = new ClaudeCodeProvider();
+
+    const turn = startTurn(provider, 'start the sweep');
+    await waitFor(() => cli[0]?.promptsDelivered.length === 1, 'the first prompt to reach stdin');
+    cli[0]!.emit({ type: 'system', subtype: 'task_started', task_id: 'sweep', description: 'Long background sweep' });
+
+    // A second writer reads the session while the drain has not begun, and is
+    // held there. Its blob is now one revision behind whatever follows.
+    let openGate = () => {};
+    store.gate = new Promise<void>(resolve => { openGate = resolve; });
+    const stragglingWrite = (provider as unknown as {
+      emitTodoUpdate(sessionId: string, todos: unknown[]): Promise<void>;
+    }).emitTodoUpdate('session-1', [{ content: 'sweep the logs', status: 'in_progress' }]);
+    await waitFor(() => store.gate === null, 'the second writer to take its snapshot');
+
+    // Now the lead finishes and the drain flag goes out.
+    cli[0]!.emit({ type: 'result', subtype: 'success', result: 'kicked off', usage: {} });
+    await waitFor(() => internals(provider).drainingBackgroundTasks, 'the lead turn to enter the drain');
+    await waitFor(() => published.drain.at(-1) === true, 'the drain to be published');
+
+    // The straggler lands last and writes its stale blob over it.
+    openGate();
+    await stragglingWrite;
+
+    // The sub-agent is still running, so the renderer must still be able to see
+    // that this session is working: the flag is the only signal it has.
+    expect(internals(provider).drainingBackgroundTasks).toBe(true);
+    expect(store.metadata.backgroundDrain).toBe(true);
+
+    provider.abort();
+    await turn.done;
   }, 20_000);
 });
