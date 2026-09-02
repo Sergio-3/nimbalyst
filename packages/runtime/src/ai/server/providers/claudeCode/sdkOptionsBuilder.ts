@@ -14,6 +14,7 @@ import type { ContentBlockParam, TextBlockParam, MessageParam } from '@anthropic
 // bump instead of silently becoming a no-op at runtime.
 import type { Options as ClaudeAgentSdkOptions, SettingSource } from '@anthropic-ai/claude-agent-sdk';
 import path from 'path';
+import { createHash } from 'crypto';
 import { app } from 'electron';
 import { ClaudeCodeDeps } from './dependencyInjection';
 import { resolveClaudeAgentCliPath } from './cliPathResolver';
@@ -92,12 +93,30 @@ export interface BuildSdkOptionsParams {
 export interface PromptStreamController {
   end(reason: string): void;
   isEnded(): boolean;
+  /**
+   * Queue a follow-up user turn on the live stream. Returns false if the
+   * stream has already ended, in which case nothing was queued.
+   *
+   * This is the only way to start another user turn without closing stdin.
+   * `Query.streamInput()` calls `transport.endInput()` unconditionally once
+   * its input iterable ends, so delivering a single message through it shuts
+   * the pipe the running sub-agents are still using. #1269.
+   */
+  push(message: SDKUserMessage): boolean;
 }
 
 export interface BuildSdkOptionsResult {
   options: ClaudeAgentSdkOptions;
   promptInput: AsyncIterable<SDKUserMessage>;
   promptController: PromptStreamController;
+  /**
+   * The content of the turn's first user message — a bare string, or the
+   * attachment blocks followed by the text. Handed back so a turn that adopts
+   * a parked query pushes the SAME content onto that query's stream instead of
+   * rebuilding it, which is what kept attachments out of the handover while
+   * two places disagreed about where they live. #1269.
+   */
+  initialUserContent: string | ContentBlockParam[];
   helperMethod: 'native' | 'custom';
 }
 
@@ -121,14 +140,38 @@ export function createPersistentPromptStream(
     };
   });
 
+  // Follow-up turns queued by push() while the generator is parked below.
+  const queue: SDKUserMessage[] = [];
+  let wake: (() => void) | null = null;
+  let wakePromise = new Promise<void>((resolve) => {
+    wake = resolve;
+  });
+
   async function* generator(): AsyncGenerator<SDKUserMessage> {
     yield initialMessage;
-    // Block here so the SDK's streamInput() doesn't finish iterating and
-    // doesn't call transport.endInput() to close the binary's stdin. The
-    // ClaudeCodeProvider arms a grace-period timer on the first `result`
-    // chunk and calls controller.end() to release us; safety nets in
-    // sendMessage's finally block and abort() ensure we always exit.
-    await endPromise;
+    // Never return before end(): the SDK's streamInput() calls
+    // transport.endInput() the moment this generator finishes iterating, which
+    // closes the binary's stdin. Follow-up user turns are yielded from the
+    // queue instead, so the pipe survives them. The ClaudeCodeProvider arms a
+    // grace-period timer on the first `result` chunk and calls
+    // controller.end() to release us; safety nets in sendMessage's finally
+    // block and abort() ensure we always exit. #1269.
+    //
+    // The queue is drained BEFORE the end check, not alongside it. push()
+    // returning true is the caller's proof that the message was delivered — the
+    // adoption path treats it as exactly that and commits the turn to the parked
+    // query on the strength of it. An end() arriving between a successful push()
+    // and the generator's next resumption must therefore still let the queued
+    // turn out; dropping it would make that proof a lie and lose the user's
+    // prompt in silence. end() still wins for everything after it: push()
+    // refuses once ended, so the queue cannot grow past this point. #1269.
+    while (true) {
+      while (queue.length > 0) {
+        yield queue.shift() as SDKUserMessage;
+      }
+      if (ended) break;
+      await Promise.race([endPromise, wakePromise]);
+    }
   }
 
   return {
@@ -141,8 +184,96 @@ export function createPersistentPromptStream(
         }
       },
       isEnded: () => ended,
+      push: (message: SDKUserMessage) => {
+        if (ended) return false;
+        queue.push(message);
+        // Swap in the next wake promise BEFORE resolving the current one, so a
+        // generator that re-enters the race parks on a fresh, unresolved one.
+        const resolveCurrent = wake;
+        wakePromise = new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+        resolveCurrent?.();
+        return true;
+      },
     },
   };
+}
+
+/**
+ * Fingerprint of the options a live SDK subprocess was started with.
+ *
+ * A parked query keeps running under the options of the turn that created it.
+ * Model, effort, thinking mode, tool restrictions, permission mode, the MCP
+ * snapshot, the working directory and the system prompt are baked into that
+ * subprocess and into the tool prefix it resumes with, so a follow-up turn that
+ * adopts the query silently answers with the PREVIOUS settings while the
+ * options logged next to it describe the new ones. Comparing fingerprints
+ * before adopting turns that into a fresh query instead.
+ *
+ * `cwd` is in here because a session's working directory changes mid-session
+ * without any user action: an agent running Bash inside a worktree makes
+ * `adoptWorktreeForSession` persist `worktreePath`, and the next turn resolves
+ * cwd from it. Adopting across that change leaves the subprocess writing to the
+ * main checkout while the UI, the file watchers and the edit attribution all
+ * describe the worktree.
+ *
+ * The system prompt travels as a HASH rather than as a list of the inputs that
+ * produced it. Those inputs (worktree path, voice mode, tracker availability,
+ * meta-agent role and its workflow preset) are turn-variable and keep growing;
+ * hashing the resolved string means a new one is covered the day it is added,
+ * without anyone remembering to extend this list. The hash is only ever
+ * compared, never logged or displayed.
+ *
+ * `permissionMode` is in here despite `Query.setPermissionMode` existing: its
+ * only caller, applyPermissionChange(), runs on a project trust change and
+ * returns early unless the requested mode is 'agent', so nothing pushes the new
+ * mode into an adopted query. Plan mode carries no allowedTools/disallowedTools
+ * of its own either — `permissionMode: 'plan'` IS the enforcement — so leaving
+ * it out gave agent, plan and auto one shared fingerprint, and a turn switched
+ * to plan went on writing files.
+ *
+ * Deliberately shallow: no deep equality over the MCP maps or hook objects. A
+ * fingerprint that is too strict only costs an adoption (the sub-agents die, the
+ * user's prompt still lands), while one that misses a field lets the divergence
+ * through — so it covers what a user actually switches, and nothing else. #1269.
+ */
+export function buildQueryOptionsSignature(options: {
+  model?: string;
+  thinking?: { type?: string };
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  permissionMode?: string;
+  mcpServers?: Record<string, unknown>;
+  env?: Record<string, string | undefined>;
+  cwd?: string;
+  systemPrompt?: string | { type?: string; preset?: string; append?: string };
+}): string {
+  const toolList = (list?: string[]) => (list ? [...list].sort().join(',') : '');
+  const prompt = options.systemPrompt;
+  // A meta-agent passes a plain string that REPLACES the CC preset; everyone
+  // else passes the preset object with an append block. Tagging the two shapes
+  // apart keeps a bare string from colliding with an append of the same text.
+  const promptSource =
+    prompt === undefined
+      ? ''
+      : typeof prompt === 'string'
+        ? `raw\u0000${prompt}`
+        : `preset\u0000${prompt.type ?? ''}\u0000${prompt.preset ?? ''}\u0000${prompt.append ?? ''}`;
+  const promptHash = promptSource
+    ? createHash('sha256').update(promptSource).digest('hex').slice(0, 16)
+    : '';
+  return [
+    `model=${options.model ?? ''}`,
+    `effort=${options.env?.CLAUDE_CODE_EFFORT_LEVEL ?? ''}`,
+    `thinking=${options.thinking?.type ?? ''}`,
+    `allowed=${toolList(options.allowedTools)}`,
+    `disallowed=${toolList(options.disallowedTools)}`,
+    `permission=${options.permissionMode ?? ''}`,
+    `mcp=${options.mcpServers ? Object.keys(options.mcpServers).sort().join(',') : ''}`,
+    `cwd=${options.cwd ?? ''}`,
+    `system=${promptHash}`,
+  ].join('|');
 }
 
 /**
@@ -577,5 +708,5 @@ export async function buildSdkOptions(
   const { iterable: promptInput, controller: promptController } =
     createPersistentPromptStream(initialMessage);
 
-  return { options, promptInput, promptController, helperMethod };
+  return { options, promptInput, promptController, initialUserContent: userContent, helperMethod };
 }

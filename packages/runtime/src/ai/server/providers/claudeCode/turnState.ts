@@ -116,6 +116,26 @@ export interface TurnState {
    */
   sawTaskNotificationThisTurn: boolean;
 
+  /**
+   * This turn runs on a query adopted from a handover lease, so it inherited
+   * background tasks older than itself and its teardown has to reap them. See
+   * `shouldReapAdoptedTasks`. #1269.
+   */
+  adoptedLease: boolean;
+  /**
+   * The chunk read still in flight when the loop left the drain for a handover.
+   * It belongs to the query, not to this turn, so it travels with the lease:
+   * the SDK hands every caller the same generator, and whoever adopts the query
+   * must consume this promise first or the next message resolves a promise
+   * nobody awaits. #1269.
+   */
+  handoverPendingChunk: Promise<IteratorResult<unknown>> | null;
+  /**
+   * Fingerprint of the options this turn's query was created with. A follow-up
+   * turn may adopt the query only if its own options match. #1269.
+   */
+  queryOptionsSignature: string;
+
   /** Latest usage seen; overwritten by the cumulative `result.usage`. */
   usageData: TurnUsage | undefined;
   /**
@@ -159,6 +179,10 @@ export function createTurnState(init: {
     completeEmitted: false,
     sawAssistantOutputThisTurn: false,
     sawTaskNotificationThisTurn: false,
+
+    adoptedLease: false,
+    handoverPendingChunk: null,
+    queryOptionsSignature: '',
 
     usageData: undefined,
     lastAssistantUsage: undefined,

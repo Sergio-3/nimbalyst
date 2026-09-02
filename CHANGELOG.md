@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 <!-- Bug fixes go here -->
+- Sending a message while background sub-agents are still working no longer kills them; the follow-up turn continues in the same session instead.
 
 ### Removed
 <!-- Removed features go here -->
