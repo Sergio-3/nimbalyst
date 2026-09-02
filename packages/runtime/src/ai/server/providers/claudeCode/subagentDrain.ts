@@ -284,11 +284,30 @@ export function countRunningTasks(tasks: Iterable<SubagentTaskLike>): number {
 
 /**
  * After the lead's `result` chunk, decide whether to defer teardown (keep
- * draining the SDK iterator) because background sub-agents are still running,
- * rather than breaking out of the loop immediately.
+ * draining the SDK iterator) rather than breaking out of the loop immediately.
+ *
+ * Two reasons to defer, and the second is not "still running":
+ *
+ * - A background sub-agent is still running. Breaking closes stdin and kills it.
+ * - A task reported terminally DURING this turn. Nothing is left running, but
+ *   the CLI enqueues its own task-notification continuation turn on ANY task
+ *   notification, and that turn outlives the `result`. Tearing down here closes
+ *   the control channel it needs: every canUseTool request in it fails
+ *   "AbortError: Stream closed" without ever reaching the host, so the user is
+ *   never asked, never sees the work, and the model records denials it
+ *   attributes to them. Deferring routes the case into the same drain that
+ *   already handles tasks finishing after the turn — `finalizeBackgroundDrain`
+ *   closes the CLI's continuation and delivers a visible one instead.
+ *
+ * The drain that a mid-turn notification opens exits at the very next chunk
+ * (nothing is running), so this costs one extra iteration, not a held-open turn.
+ * See GitHub #1410.
  */
-export function shouldDeferTeardownForSubagents(hasRunning: boolean): boolean {
-  return hasRunning;
+export function shouldDeferTeardownForSubagents(
+  hasRunning: boolean,
+  sawTaskNotificationThisTurn: boolean,
+): boolean {
+  return hasRunning || sawTaskNotificationThisTurn;
 }
 
 /**

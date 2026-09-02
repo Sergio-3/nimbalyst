@@ -293,9 +293,24 @@ describe('hasRunningTasks', () => {
 });
 
 describe('shouldDeferTeardownForSubagents', () => {
-  it('defers only while a sub-agent is still running', () => {
-    expect(shouldDeferTeardownForSubagents(true)).toBe(true);
-    expect(shouldDeferTeardownForSubagents(false)).toBe(false);
+  it('defers while a sub-agent is still running', () => {
+    expect(shouldDeferTeardownForSubagents(true, false)).toBe(true);
+  });
+
+  it('tears down when nothing ran and no task reported', () => {
+    expect(shouldDeferTeardownForSubagents(false, false)).toBe(false);
+  });
+
+  // A task that reported terminally DURING the turn leaves nothing running, so
+  // keying off that alone tore the turn down — while the CLI had already queued
+  // its own task-notification continuation turn. That turn then ran against a
+  // closed control channel: every canUseTool request failed "AbortError: Stream
+  // closed" without reaching the host, so the user was never asked, saw none of
+  // the work, and the model recorded denials it attributed to them. Deferring
+  // routes the case into the drain, which closes the CLI's turn and delivers a
+  // visible continuation instead. See #1410.
+  it('defers when a task reported terminally during the turn, with nothing left running', () => {
+    expect(shouldDeferTeardownForSubagents(false, true)).toBe(true);
   });
 });
 

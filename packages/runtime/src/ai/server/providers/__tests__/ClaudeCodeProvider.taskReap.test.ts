@@ -80,6 +80,11 @@ type ProviderInternals = {
     abortController: AbortController | null;
   };
   finalizeBackgroundDrain: (sessionId: string | undefined, query?: { close?: () => void } | null) => void;
+  handleSystemTask: (
+    subtype: string,
+    chunk: { task_id: string; status?: string; summary?: string; output_file?: string },
+    sessionId: string | undefined,
+  ) => void;
   reapTasksOfEndedAdoptedTurn: (
     parts: {
       query: unknown;
@@ -728,6 +733,55 @@ describe('ClaudeCodeProvider handover lease lifecycle', () => {
 
     expect(state.activeTasks.get('ghost')?.status).toBe('stopped');
     expect(state.activeTasks.get('mine')?.status).toBe('running');
+  });
+});
+
+/**
+ * A background task that settles WHILE the turn is still streaming, rather than
+ * after it ended. Nothing is left running at the `result`, so the drain gate used
+ * to tear the turn down — but the CLI has already queued its own continuation
+ * turn for the notification, and that turn then ran against a closed control
+ * channel: permission requests failed "Stream closed" without reaching the host.
+ * The user was never asked and saw none of the work. Routing the case into the
+ * drain reuses the machinery that already handles the after-the-turn case: the
+ * CLI's turn is closed and a visible continuation carries the results. #1410.
+ */
+describe('ClaudeCodeProvider task settling mid-turn', () => {
+  // The capture used to be gated on `drainingBackgroundTasks`, which is still
+  // false while the turn streams — so the one notification the continuation had
+  // to announce was the one that got dropped.
+  it('keeps a notification that arrives before the drain opens', () => {
+    const { provider, state } = providerInDrain();
+    state.drainingBackgroundTasks = false;
+    state.drainTerminalNotifications = [];
+
+    state.handleSystemTask(
+      'task_notification',
+      { task_id: 'subagent', status: 'completed', summary: 'sweep done' },
+      'session-in-drain',
+    );
+
+    expect(state.drainTerminalNotifications).toEqual([
+      expect.objectContaining({ taskId: 'subagent', status: 'completed', summary: 'sweep done' }),
+    ]);
+    void provider;
+  });
+
+  it('closes the CLI continuation turn and announces the result instead', () => {
+    const { provider, state, close } = providerInDrain();
+    const idle = vi.fn();
+    provider.on('teammate:messageWhileIdle', idle);
+    state.activeTasks.get('subagent')!.status = 'completed';
+    state.drainTerminalNotifications = [
+      { taskId: 'subagent', description: 'Long background sweep', status: 'completed' },
+    ];
+    state.drainExitCause = 'resolved';
+
+    state.finalizeBackgroundDrain('session-in-drain', state.leadQuery);
+
+    expect(close).toHaveBeenCalled();
+    expect(idle).toHaveBeenCalledTimes(1);
+    expect(idle.mock.calls[0][0].message).toContain('Long background sweep');
   });
 });
 
