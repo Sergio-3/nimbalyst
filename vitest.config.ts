@@ -125,6 +125,9 @@ const nodeOnly = [
   'packages/collab-client/src/feedback-ui/__tests__/artifactScrollCarry.test.ts',
   // Layout <-> saved-view definition translation is pure object shuffling.
   'packages/electron/src/renderer/components/TrackerMode/__tests__/trackerViewDefinition.test.ts',
+  // `AgentMode` is otherwise React components; the task wording is a pair of
+  // pure string maps.
+  'packages/electron/src/renderer/components/AgentMode/__tests__/taskPresentation.test.ts',
   // `EmbedFrame` is otherwise React components; the drop payload is pure
   // string handling over a `getData` stub and needs no DOM.
   'packages/electron/src/renderer/components/EmbedFrame/__tests__/canvasDropSource.test.ts',
