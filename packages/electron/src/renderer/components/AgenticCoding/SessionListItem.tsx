@@ -5,7 +5,7 @@ import { MaterialSymbol } from '@nimbalyst/runtime/ui/icons/MaterialSymbol';
 import { WorktreeIcon } from '../common/WorktreeIcon';
 import { ProviderIcon } from '@nimbalyst/runtime/ui/icons/ProviderIcons';
 import { getRelativeTimeString } from '../../utils/dateFormatting';
-import { sessionOrChildProcessingAtom, sessionUnreadAtom, sessionPendingPromptAtom, sessionHasPendingInteractivePromptAtom, reparentSessionAtom, refreshSessionListAtom, sessionShareAtom, sessionWakeupAtom, sessionLastActivityAtom } from '../../store';
+import { sessionOrChildProcessingAtom, sessionUnreadAtom, sessionPendingPromptAtom, sessionHasPendingInteractivePromptAtom, reparentSessionAtom, refreshSessionListAtom, sessionShareAtom, sessionWakeupAtom, sessionLastActivityAtom, sessionBackgroundDrainAtom, sessionRunningTaskCountAtom } from '../../store';
 import { convertToWorkstreamAtom, sessionRegistryAtom } from '../../store/atoms/sessions';
 import { SessionContextMenu } from './SessionContextMenu';
 import { FullTitleTooltip } from './FullTitleTooltip';
@@ -28,8 +28,15 @@ export const SessionStatusIndicator = memo<{ sessionId: string; messageCount?: n
   const wakeup = useAtomValue(sessionWakeupAtom(sessionId));
   // Lead turn is over; the session is only draining background shells/sub-agents.
   const backgroundTasks = useAtomValue(sessionBackgroundTasksAtom(sessionId));
+  // The lead turn is over and background sub-agents still hold the query open.
+  // Two things follow from it: the row keeps its running indicator through the
+  // window where a send-now handed the query on and no turn of this session's
+  // own is live, and the indicator says WHO is working. The task panel already
+  // distinguishes the two; the row only ever had one spinner for both. #1269.
+  const hasBackgroundWork = useAtomValue(sessionBackgroundDrainAtom(sessionId));
+  const runningTaskCount = useAtomValue(sessionRunningTaskCountAtom(sessionId));
 
-  // Priority: waiting for input > processing > pending prompt > scheduled wakeup > unread > message count
+  // Priority: waiting for input > processing (lead or background) > pending prompt > scheduled wakeup > unread > message count
   // All interactive prompts (AskUserQuestion, ExitPlanMode, ToolPermission, etc.) show same indicator
   if (hasPendingInteractivePrompt) {
     return (
@@ -39,7 +46,9 @@ export const SessionStatusIndicator = memo<{ sessionId: string; messageCount?: n
     );
   }
 
-  if (isProcessing && backgroundTasks?.length) {
+  // A handover releases the turn, so isProcessing reads false while the
+  // handed-on sub-agents still run; the drain flag keeps the row showing it. #1269.
+  if ((isProcessing || hasBackgroundWork) && backgroundTasks?.length) {
     return (
       <div className="session-list-item-status background-wait flex items-center justify-center w-5 h-5 text-[var(--nim-text-muted)] animate-pulse" title={describeBackgroundWait(backgroundTasks, Date.now())}>
         <MaterialSymbol icon="timelapse" size={14} />
@@ -47,9 +56,16 @@ export const SessionStatusIndicator = memo<{ sessionId: string; messageCount?: n
     );
   }
 
-  if (isProcessing) {
+  if (isProcessing || hasBackgroundWork) {
+    // Muted while the lead is done and sub-agents carry on, for the window in
+    // which the live wait list above has not been published.
     return (
-      <div className="session-list-item-status processing flex items-center justify-center w-5 h-5 text-[var(--nim-primary)] opacity-80" title="Processing...">
+      <div
+        className={`session-list-item-status processing ${hasBackgroundWork ? 'background-work text-[var(--nim-text-muted)]' : 'text-[var(--nim-primary)]'} flex items-center justify-center w-5 h-5 opacity-80`}
+        title={hasBackgroundWork
+          ? `Lead is done; ${runningTaskCount || 'background'} background ${runningTaskCount === 1 ? 'agent' : 'agents'} still working`
+          : 'Processing...'}
+      >
         <MaterialSymbol icon="progress_activity" size={14} className="animate-spin" />
       </div>
     );

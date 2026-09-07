@@ -971,6 +971,21 @@ export const sessionBackgroundDrainAtom = atomFamily((sessionId: string) =>
   atom((get) => get(sessionStoreAtom(sessionId))?.metadata?.backgroundDrain === true)
 );
 
+/**
+ * How many sub-agent tasks are running right now. Counted off the same metadata
+ * rather than through `sessionTasksAtom` (store/atoms/agentMode) so the session
+ * row does not pull the runtime store into its module graph: the row renders
+ * once per session in the list, and that import costs every one of them.
+ */
+export const sessionRunningTaskCountAtom = atomFamily((sessionId: string) =>
+  atom((get) => {
+    const raw = get(sessionStoreAtom(sessionId))?.metadata?.currentTasks;
+    return Array.isArray(raw)
+      ? raw.filter((task) => (task as { status?: string })?.status === 'running').length
+      : 0;
+  })
+);
+
 export const sessionCurrentTodosAtom = atomFamily((sessionId: string) =>
   atom((get) => {
     const raw = get(sessionStoreAtom(sessionId))?.metadata?.currentTodos;
