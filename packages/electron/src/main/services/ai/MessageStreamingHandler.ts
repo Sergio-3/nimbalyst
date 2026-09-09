@@ -49,6 +49,7 @@ import {
   buildMcpSessionStatusSnapshot,
   type McpSessionStatusInput,
 } from '@nimbalyst/runtime/types/MCPServerConfig';
+import { getRemoteControlSnapshot } from '../../ipc/RemoteControlHandlers';
 import { toolRegistry } from './tools';
 import type { DriveReason } from './QueueDriveService';
 import { resolveExtensionAgentRef, usesHostSuppliedToolLoop } from './providerResolution';
@@ -910,6 +911,17 @@ export class MessageStreamingHandler {
       });
     };
     this.installListener(provider, 'remoteControl:changed', onRemoteControlChanged);
+
+    // The chip's pull runs once, when it mounts -- which for a session the user
+    // opens and then talks to is *before* any provider exists, so it reports
+    // `active: false` and the control hides itself for the life of the view.
+    // Installing these listeners means a provider now exists, so push the
+    // snapshot that the mount-time pull could not have seen. Built by the same
+    // function the pull handler uses, so pushed and pulled stay identical.
+    safeSend(event, 'ai:remote-control:changed', {
+      ...getRemoteControlSnapshot(session.id, session.provider),
+      workspacePath: effectiveWorkspacePath,
+    });
 
     // Forward any provider-side title updates to all renderers so the session
     // list updates in real time.

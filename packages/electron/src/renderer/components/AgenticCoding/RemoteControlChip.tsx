@@ -49,13 +49,26 @@ export function RemoteControlChip({ sessionId, provider }: RemoteControlChipProp
     void refresh();
   }, [refresh]);
 
-  // Live transitions, including the bridge dropping on its own.
+  // Live transitions: the bridge dropping on its own, and the session becoming
+  // bridgeable in the first place.
+  //
+  // A push only ever originates from a live provider, so it is authoritative
+  // about `supported` and `active` too and replaces the state rather than
+  // merging into it. Merging stranded the case this chip is usually in: mounted
+  // before the session's first turn, so the pull reported `active: false` and
+  // left `status` null -- nothing to merge into, and no second pull coming.
   useEffect(() => {
     const api = (window as any).electronAPI;
     if (!api?.onRemoteControlChanged) return;
-    return api.onRemoteControlChanged((data: { sessionId?: string; connected?: boolean; sessionUrl?: string | null }) => {
+    return api.onRemoteControlChanged((data: Partial<RemoteControlSnapshot>) => {
       if (data?.sessionId !== sessionId) return;
-      setStatus((prev) => (prev ? { ...prev, connected: Boolean(data.connected), sessionUrl: data.sessionUrl ?? null } : prev));
+      setStatus((prev) => ({
+        sessionId,
+        supported: data.supported ?? prev?.supported ?? true,
+        active: data.active ?? prev?.active ?? true,
+        connected: Boolean(data.connected),
+        sessionUrl: data.sessionUrl ?? null,
+      }));
     });
   }, [sessionId]);
 

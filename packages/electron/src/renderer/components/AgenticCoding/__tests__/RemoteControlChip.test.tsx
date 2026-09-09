@@ -63,6 +63,24 @@ describe('RemoteControlChip', () => {
     expect(screen.queryByTestId('remote-control-chip-button')).toBeNull();
   });
 
+  it('appears when the session goes live after the chip mounted', async () => {
+    // The common case, and the one that used to fail: the header renders with
+    // the session, the pull finds no provider yet, and the user then sends a
+    // first message. Without a push that carries `active`, the control stayed
+    // hidden for the whole life of the view.
+    installApi({ aiGetRemoteControl: vi.fn(async () => snapshot({ active: false })) });
+
+    render(<RemoteControlChip sessionId={SESSION_ID} provider="claude-code" />);
+    await waitFor(() => expect((window as any).electronAPI.aiGetRemoteControl).toHaveBeenCalled());
+    expect(screen.queryByTestId('remote-control-chip-button')).toBeNull();
+
+    await act(async () => {
+      pushListener?.(snapshot({ connected: false, sessionUrl: null }));
+    });
+
+    expect(screen.getByTestId('remote-control-chip-button').textContent).toContain('Remote');
+  });
+
   it('offers the control on a live session and connects on click', async () => {
     const enable = vi.fn(async () =>
       snapshot({ connected: true, sessionUrl: 'https://claude.ai/code/session_x' }),
