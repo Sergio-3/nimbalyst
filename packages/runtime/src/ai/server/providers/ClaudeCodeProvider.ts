@@ -13,8 +13,37 @@ interface Query extends AsyncGenerator<SDKMessage, void> {
   streamInput(stream: AsyncIterable<any>): Promise<void>;
   mcpServerStatus(): Promise<McpServerStatusInfo[]>;
   reconnectMcpServer(serverName: string): Promise<void>;
+  /**
+   * Start or stop the Remote Control bridge for this session, so the user can
+   * drive it from claude.ai/code or the Claude mobile app.
+   *
+   * Present on the SDK's query object but absent from its type declarations,
+   * hence the local declaration. See
+   * https://github.com/anthropics/claude-agent-sdk-typescript/issues/460
+   */
+  enableRemoteControl(
+    enabled: boolean,
+    name?: string,
+    opts?: {
+      reattachSessionId?: string;
+      keepSessionOnExit?: boolean;
+      workSecret?: string;
+      refreshWorkSecret?: boolean;
+    }
+  ): Promise<RemoteControlInfo>;
   /** Close the query and terminate the underlying CLI subprocess. */
   close(): void;
+}
+
+/** What the SDK returns when a Remote Control bridge is established. */
+export interface RemoteControlInfo {
+  /** claude.ai URL of the bridged session, used for pairing. */
+  session_url?: string;
+  connect_url?: string;
+  environment_id?: string;
+  bridge_epoch?: number;
+  /** Present once the bridge is live; absent means it never came up. */
+  bridge_session_id?: string;
 }
 
 /** MCP server status as reported by the SDK */
@@ -413,6 +442,13 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
   // Unlike leadQuery which is nulled after each turn, this stays set as long as
   // the SDK subprocess is alive (i.e. the session has MCP servers).
   private mcpQuery: Query | null = null;
+
+  // Persistent query reference for Remote Control (survives between turns).
+  // Set for every session, unlike mcpQuery which only exists when the session
+  // has MCP servers. A Remote Control bridge must outlive a single turn.
+  private sessionQuery: Query | null = null;
+  // Last bridge info returned by the SDK, or null when Remote Control is off.
+  private remoteControl: RemoteControlInfo | null = null;
 
   // Permission service for tool permission handling
   private permissionService: ToolPermissionService | null = null;
@@ -1994,6 +2030,8 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
     // Clean up MCP health checks and persistent query reference
     this.stopMcpHealthChecks();
     this.mcpQuery = null;
+    this.sessionQuery = null;
+    this.remoteControl = null;
     this.currentSessionId = undefined;
   }
 
@@ -2950,6 +2988,10 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       toolCount: chunk.tools?.length || 0,
     };
 
+    // Kept for every session: Remote Control needs a query reference that
+    // outlives the current turn, whether or not MCP servers are configured.
+    this.sessionQuery = this.leadQuery;
+
     if (mcpServerCount > 0) {
       this.currentSessionId = sessionId;
       this.mcpQuery = this.leadQuery;
@@ -3018,6 +3060,10 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       if (this.mcpQuery === (query as unknown as Query)) {
         this.stopMcpHealthChecks();
         this.mcpQuery = null;
+      }
+      if (this.sessionQuery === (query as unknown as Query)) {
+        this.sessionQuery = null;
+        this.remoteControl = null;
       }
     }
 
@@ -3496,6 +3542,65 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
    */
   getMcpServerStatuses(): McpServerStatusInfo[] {
     return Array.from(this.mcpServerStatuses.values());
+  }
+
+  /**
+   * Start the Remote Control bridge so this session can be driven from
+   * claude.ai/code or the Claude mobile app.
+   *
+   * Uses sessionQuery (persistent across turns) rather than leadQuery, because
+   * the bridge must survive between turns. The SDK's `remoteControlAtStartup`
+   * setting does not cover us: it only auto-connects interactive CLI sessions.
+   *
+   * Returns the bridge info; `session_url` is what the user needs for pairing.
+   */
+  async enableRemoteControl(name?: string): Promise<RemoteControlInfo> {
+    const q = this.sessionQuery;
+    if (!q) {
+      throw new Error('No active session to enable Remote Control');
+    }
+    if (typeof q.enableRemoteControl !== 'function') {
+      throw new Error('The bundled Claude Agent SDK does not expose Remote Control');
+    }
+    console.log(`[CLAUDE-CODE] Enabling Remote Control${name ? ` as "${name}"` : ''}`);
+    const info = await q.enableRemoteControl(true, name);
+    // No bridge id means the bridge never came up; don't report it as live.
+    this.remoteControl = info?.bridge_session_id ? info : null;
+    this.emitRemoteControlChanged();
+    return info;
+  }
+
+  /**
+   * Stop the Remote Control bridge. Safe to call when it is already off.
+   */
+  async disableRemoteControl(): Promise<void> {
+    const q = this.sessionQuery;
+    if (!q || typeof q.enableRemoteControl !== 'function') {
+      this.remoteControl = null;
+      this.emitRemoteControlChanged();
+      return;
+    }
+    console.log('[CLAUDE-CODE] Disabling Remote Control');
+    try {
+      await q.enableRemoteControl(false);
+    } finally {
+      this.remoteControl = null;
+      this.emitRemoteControlChanged();
+    }
+  }
+
+  /**
+   * Current Remote Control bridge info, or null when it is off.
+   */
+  getRemoteControlInfo(): RemoteControlInfo | null {
+    return this.remoteControl;
+  }
+
+  private emitRemoteControlChanged(): void {
+    this.emit('remoteControl:changed', {
+      sessionId: this.currentSessionId,
+      remoteControl: this.remoteControl,
+    });
   }
 
   /**
