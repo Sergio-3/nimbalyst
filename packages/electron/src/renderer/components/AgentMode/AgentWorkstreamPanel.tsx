@@ -49,6 +49,7 @@ import { AgentReviewPanel } from './AgentReviewPanel';
 import { ChatSidebar } from '../ChatSidebar/ChatSidebar';
 import { LayoutControls } from '../UnifiedAI/LayoutControls';
 import { ActiveSessionMcpStatusChip } from '../AgenticCoding/McpSessionStatusChip';
+import { ActiveSessionRemoteControlChip } from '../AgenticCoding/RemoteControlChip';
 import { WorktreeIcon } from '../common/WorktreeIcon';
 import { toggleWorkstreamHeaderPin } from './workstreamHeaderPin';
 import {
@@ -736,6 +737,11 @@ const WorkstreamHeader: React.FC<{
             providers with no MCP status channel and for sessions that have not
             run a turn yet, so a healthy or irrelevant session shows nothing. */}
         {activeSessionId && <ActiveSessionMcpStatusChip sessionId={activeSessionId} />}
+
+        {/* Remote Control for the session currently in view. Hides itself
+            for providers that cannot bridge and for sessions that have not
+            run a turn yet, so the toggle only appears where it can work. */}
+        {activeSessionId && <ActiveSessionRemoteControlChip sessionId={activeSessionId} />}
 
         {/* Terminal button - only show for worktree sessions, positioned before layout controls */}
         {worktreeId && onOpenTerminal && (
