@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 <!-- Bug fixes go here -->
 - Sending a message while background sub-agents are still working no longer kills them; the follow-up turn continues in the same session, and the session row keeps showing that work is still running.
+- Answering a multiple-choice question now clears the "waiting for your response" marker on the session right away, instead of leaving it up until the turn ends.
 
 ### Removed
 <!-- Removed features go here -->

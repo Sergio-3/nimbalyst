@@ -312,13 +312,20 @@ export async function handleAskUserQuestion(
           });
         }
 
-        // NIM-850: the resolved broadcast. For claude-code-cli the renderer
-        // otherwise never clears the flag mid-turn — session:streaming
-        // intentionally doesn't, and there was no resolved broadcast — so
-        // "Thinking…" stayed suppressed until the turn ended. Mirrors
-        // PromptForUserInput's ai:requestUserInputResolved. Sent on abandonment
-        // too: nothing is blocked on this session any more, whether or not the
-        // question still stands.
+      }
+
+      // NIM-850: the resolved broadcast. The renderer otherwise never clears the
+      // flag mid-turn — session:streaming intentionally doesn't — so "Thinking…"
+      // stays suppressed until the turn ends. Mirrors PromptForUserInput's
+      // ai:requestUserInputResolved, which is ungated for the same reason. Sent
+      // on abandonment too: nothing is blocked on this session any more, whether
+      // or not the question still stands.
+      //
+      // Not CLI-only. On every other provider session:waiting sets the same flag
+      // with no symmetric clear, so gating this left the row claiming "waiting
+      // for your response" for the rest of the turn. Persisting the tool_result
+      // above stays CLI-only — the SDK writes its own.
+      if (sessionId) {
         for (const w of BrowserWindow.getAllWindows()) {
           if (!w.isDestroyed()) {
             w.webContents.send("ai:askUserQuestionAnswered", {

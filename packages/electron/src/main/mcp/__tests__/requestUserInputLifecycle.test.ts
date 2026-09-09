@@ -1,7 +1,61 @@
 // @vitest-environment node
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
+
+const { ipcMainStub, windowSends } = await vi.hoisted(async () => {
+  const { EventEmitter: E } = await import('events');
+  const emitter = new E();
+  emitter.setMaxListeners(0);
+  return {
+    ipcMainStub: emitter,
+    windowSends: [] as Array<{ channel: string; payload: any }>,
+  };
+});
+
+vi.mock('electron', () => ({
+  ipcMain: ipcMainStub,
+  BrowserWindow: {
+    getAllWindows: () => [
+      {
+        isDestroyed: () => false,
+        webContents: {
+          send: (channel: string, payload: any) => {
+            windowSends.push({ channel, payload });
+          },
+        },
+      },
+    ],
+  },
+  app: { getPath: () => '/tmp', getName: () => 'nimbalyst', isPackaged: false, on: () => {} },
+  Notification: class {
+    static isSupported() {
+      return false;
+    }
+    show() {}
+    on() {}
+  },
+  nativeImage: { createFromPath: () => ({ isEmpty: () => true }) },
+  shell: { openExternal: async () => {} },
+}));
+
+// The prompt under test is opened by an SDK (`claude-code`) session, so the
+// CLI-only branches stay closed. The remaining stubs cut the settle path off
+// from the tray, the sync provider, the session-state manager and the database;
+// each is covered by its own test and none of them decides what this file asks.
+vi.mock('../tools/interactivePromptTranscript', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../tools/interactivePromptTranscript')>()),
+  isClaudeCliSession: async () => false,
+}));
+vi.mock('../tools/interactivePromptSettleState', () => ({
+  applyInteractivePromptSettleTurnState: async () => {},
+}));
+vi.mock('../../services/ai/pendingPromptPersistence', () => ({
+  setSessionPendingPrompt: async () => {},
+}));
+vi.mock('@nimbalyst/runtime/ai/server/SessionStateManager', () => ({
+  getSessionStateManager: () => ({ updateActivity: async () => {} }),
+}));
 
 import {
   buildCodexToolLookupId,
@@ -13,7 +67,10 @@ import {
   notePendingInteractiveWaiter,
   shouldSettleFromSessionFallback,
 } from '../tools/interactivePromptFallback';
-import { getInteractiveToolSchemas } from '../tools/interactiveToolHandlers';
+import {
+  getInteractiveToolSchemas,
+  handleAskUserQuestion,
+} from '../tools/interactiveToolHandlers';
 
 const ipc = new EventEmitter();
 
@@ -325,5 +382,45 @@ describe('RequestUserInput lifecycle', () => {
         defaultValue: { type: 'boolean' },
       },
     });
+  });
+});
+
+// The MCP AskUserQuestion tool serves every provider and sets the "awaiting
+// input" bit for every provider, so every provider must also get the clear.
+// Without the resolved broadcast the renderer has nothing to clear it with
+// mid-turn -- `session:streaming` deliberately does not -- so a session that was
+// answered keeps the warning marker, which outranks and hides the running
+// spinner for the rest of the turn. `PromptForUserInput` above broadcasts
+// unconditionally; this pins the same promise for its sister tool.
+describe('AskUserQuestion settle broadcast', () => {
+  it('tells every window the question was answered on a non-CLI session', async () => {
+    const sessionId = 'sdk-session-ask-user-question';
+    windowSends.length = 0;
+
+    const pending = handleAskUserQuestion(
+      {
+        questions: [
+          {
+            header: 'Pick',
+            question: 'Which one?',
+            options: [{ label: 'A', description: 'the first one' }],
+          },
+        ],
+      },
+      sessionId,
+      {},
+    );
+
+    const fallbackChannelName = `ask-user-question:${sessionId}`;
+    await vi.waitFor(() => expect(ipcMainStub.listenerCount(fallbackChannelName)).toBe(1));
+
+    ipcMainStub.emit(fallbackChannelName, {}, { answers: { Pick: 'A' }, respondedBy: 'desktop' });
+    await pending;
+
+    expect(
+      windowSends
+        .filter((sent) => sent.channel === 'ai:askUserQuestionAnswered')
+        .map((sent) => sent.payload.sessionId),
+    ).toEqual([sessionId]);
   });
 });
