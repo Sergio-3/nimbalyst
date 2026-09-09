@@ -644,6 +644,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('ai:mcp-status:changed', handler);
   },
 
+  // Per-session Remote Control (GH #1480). Same pull-then-push shape as MCP
+  // status: read once for first render, then listen for transitions.
+  aiGetRemoteControl: (sessionId: string, provider: string) =>
+    ipcRenderer.invoke('ai:remote-control:get', { sessionId, provider }),
+  aiEnableRemoteControl: (sessionId: string, provider: string, name?: string) =>
+    ipcRenderer.invoke('ai:remote-control:enable', { sessionId, provider, name }),
+  aiDisableRemoteControl: (sessionId: string, provider: string) =>
+    ipcRenderer.invoke('ai:remote-control:disable', { sessionId, provider }),
+  onRemoteControlChanged: (callback: (data: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('ai:remote-control:changed', handler);
+    return () => ipcRenderer.removeListener('ai:remote-control:changed', handler);
+  },
+
   // CLI management
   cliCheckInstallation: (tool: string) => ipcRenderer.invoke('cli:checkInstallation', tool),
   cliGetInstallStrategy: (tool: string) => ipcRenderer.invoke('cli:getInstallStrategy', tool),

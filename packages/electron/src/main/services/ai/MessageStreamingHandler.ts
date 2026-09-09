@@ -894,6 +894,23 @@ export class MessageStreamingHandler {
     };
     this.installListener(provider, 'mcpServerStatus:changed', onMcpServerStatusChanged);
 
+    // Remote Control transitions (GH #1480). Like the MCP listener above this
+    // has to survive turn boundaries: the bridge is held by sessionQuery, which
+    // outlives leadQuery precisely so a connected session stays connected
+    // between turns.
+    const onRemoteControlChanged = (data: {
+      sessionId?: string;
+      remoteControl?: { session_url?: string; bridge_session_id?: string } | null;
+    }) => {
+      safeSend(event, 'ai:remote-control:changed', {
+        sessionId: data?.sessionId || session.id,
+        connected: Boolean(data?.remoteControl?.bridge_session_id),
+        sessionUrl: data?.remoteControl?.session_url ?? null,
+        workspacePath: effectiveWorkspacePath,
+      });
+    };
+    this.installListener(provider, 'remoteControl:changed', onRemoteControlChanged);
+
     // Forward any provider-side title updates to all renderers so the session
     // list updates in real time.
     // Mirrors the broadcast that SessionNamingService does for the MCP-tool path.
