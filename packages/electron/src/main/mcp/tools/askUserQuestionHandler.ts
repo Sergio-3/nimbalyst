@@ -199,15 +199,17 @@ export async function handleAskUserQuestion(
   // the settle below broadcasts ai:askUserQuestionAnswered to clear it. Sent to all
   // windows (the renderer handler keys by sessionId).
   //
-  // The broadcast stays CLI-only for the reason above. The pending bit does NOT:
-  // this handler serves the MCP AskUserQuestion tool for every provider, and an
-  // SDK session waiting on this question is exactly as blocked as a CLI one.
-  // Guarding it meant neither the sidebar nor the menu bar knew, and the tray
-  // panel filed those sessions under "Running".
+  // Neither the pending bit nor the broadcast is CLI-only: this handler serves
+  // the MCP AskUserQuestion tool for every provider, and an SDK session waiting
+  // on this question is exactly as blocked as a CLI one. Guarding the bit meant
+  // neither the sidebar nor the menu bar knew, and the tray panel filed those
+  // sessions under "Running". Guarding the broadcast left the row on the spinner
+  // until the transcript mounted and re-derived the flag from the messages —
+  // a question waiting in a session you are not looking at was invisible.
   if (sessionId) {
     void setSessionPendingPrompt(sessionId, true, "decision");
   }
-  if (isCliSession && sessionId) {
+  if (sessionId) {
     for (const w of BrowserWindow.getAllWindows()) {
       if (!w.isDestroyed()) {
         w.webContents.send("ai:askUserQuestion", {

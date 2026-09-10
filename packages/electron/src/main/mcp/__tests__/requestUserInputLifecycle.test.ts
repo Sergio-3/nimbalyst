@@ -440,4 +440,39 @@ describe('AskUserQuestion settle broadcast', () => {
         .map((sent) => sent.payload.sessionId),
     ).toEqual([sessionId]);
   });
+
+  // The same promise for the opening half. Without this broadcast the renderer
+  // only learns about a pending question when the transcript mounts and
+  // re-derives the flag from the messages -- so a question waiting in a session
+  // the user is not looking at shows a running spinner instead of the marker.
+  it('tells every window a question is pending on a non-CLI session', async () => {
+    const sessionId = 'sdk-session-ask-user-question-open';
+    windowSends.length = 0;
+
+    const pending = handleAskUserQuestion(
+      {
+        questions: [
+          {
+            header: 'Pick',
+            question: 'Which one?',
+            options: [{ label: 'A', description: 'the first one' }],
+          },
+        ],
+      },
+      sessionId,
+      {},
+    );
+
+    const fallbackChannelName = `ask-user-question:${sessionId}`;
+    await vi.waitFor(() => expect(ipcMainStub.listenerCount(fallbackChannelName)).toBe(1));
+
+    expect(
+      windowSends
+        .filter((sent) => sent.channel === 'ai:askUserQuestion')
+        .map((sent) => sent.payload.sessionId),
+    ).toEqual([sessionId]);
+
+    ipcMainStub.emit(fallbackChannelName, {}, { answers: { Pick: 'A' }, respondedBy: 'desktop' });
+    await pending;
+  });
 });
