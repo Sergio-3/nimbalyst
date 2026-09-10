@@ -51,7 +51,7 @@ export const SessionStatusIndicator = memo<{ sessionId: string; messageCount?: n
       <div
         className={`session-list-item-status processing ${hasBackgroundWork ? 'background-work text-[var(--nim-text-muted)]' : 'text-[var(--nim-primary)]'} flex items-center justify-center w-5 h-5 opacity-80`}
         title={hasBackgroundWork
-          ? `Lead is done; ${runningTaskCount || 'background'} background ${runningTaskCount === 1 ? 'agent' : 'agents'} still working`
+          ? `Lead is done; ${runningTaskCount || 'background'} background ${runningTaskCount === 1 ? 'task' : 'tasks'} still working`
           : 'Processing...'}
       >
         <MaterialSymbol icon="progress_activity" size={14} className="animate-spin" />
