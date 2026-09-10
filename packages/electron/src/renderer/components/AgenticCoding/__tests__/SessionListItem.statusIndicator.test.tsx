@@ -48,8 +48,10 @@ describe('session row status while background sub-agents run', () => {
 
     const indicator = container.querySelector('.session-list-item-status.processing.background-work');
     expect(indicator).not.toBeNull();
-    // Whose work it is, in the one place the row can say it.
-    expect(indicator?.getAttribute('title')).toContain('1 background agent');
+    // How much work is left, in the one place the row can say it. Not "agent":
+    // the count includes shell commands, which is what made the task list read
+    // like a crashed sub-agent in the first place.
+    expect(indicator?.getAttribute('title')).toContain('1 background task');
   });
 
   it('reads as the lead working while its own turn is live', () => {
