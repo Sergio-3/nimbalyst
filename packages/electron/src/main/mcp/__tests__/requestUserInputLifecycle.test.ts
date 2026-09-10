@@ -56,6 +56,11 @@ vi.mock('../../services/ai/pendingPromptPersistence', () => ({
 vi.mock('@nimbalyst/runtime/ai/server/SessionStateManager', () => ({
   getSessionStateManager: () => ({ updateActivity: async () => {} }),
 }));
+// The handler reads the session's provider to special-case Codex. Without a
+// stub the real repository runs and throws for want of a store adapter.
+vi.mock('@nimbalyst/runtime/storage/repositories/AISessionsRepository', () => ({
+  AISessionsRepository: { get: async () => ({ provider: 'claude-code' }) },
+}));
 
 import {
   buildCodexToolLookupId,
