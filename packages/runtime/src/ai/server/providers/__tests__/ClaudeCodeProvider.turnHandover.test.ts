@@ -17,7 +17,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({
   app: { isPackaged: false },
@@ -25,14 +25,6 @@ vi.mock('electron', () => ({
 
 /** Every 'ai-edit' restore point the run wrote, in order. */
 const history = vi.hoisted(() => ({ snapshots: [] as string[] }));
-vi.mock('../../../../../../electron/src/main/HistoryManager', () => ({
-  historyManager: {
-    createSnapshot: async (filePath: string) => { history.snapshots.push(filePath); },
-    getPendingTags: async () => [],
-    createTag: async () => {},
-    updateTagStatus: async () => {},
-  },
-}));
 
 vi.mock('../claudeCode/cliPathResolver', () => ({
   resolveClaudeAgentCliPath: async () => '/fake/claude',
@@ -235,6 +227,18 @@ async function runToDrain(
 }
 
 describe('ClaudeCodeProvider send-now during a sub-agent drain', () => {
+  // The history manager is injected, not imported -- a module mock of it is a
+  // silent no-op and the snapshots never arrive.
+  beforeEach(() => {
+    history.snapshots.length = 0;
+    ClaudeCodeProvider.setHistoryManager({
+      createSnapshot: async (filePath: string) => { history.snapshots.push(filePath); },
+      getPendingTags: async () => [],
+      tagFile: async () => {},
+      updateTagStatus: async () => {},
+    });
+  });
+
   // The v1 regression, end to end. A turn that adopted the query and is then
   // interrupted while still generating is the one exit where neither a drain
   // nor an abort runs, so the teardown's own reap is all there is. Without it
