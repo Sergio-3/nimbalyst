@@ -81,7 +81,12 @@ vi.mock('../../../../storage/repositories/AISessionsRepository', () => ({
       if (typeof patch.metadata?.backgroundDrain === 'boolean') {
         published.drain.push(patch.metadata.backgroundDrain as boolean);
       }
-      if (patch.metadata) store.metadata = { ...patch.metadata };
+      // Deep-copy, because the real store round-trips through the database and
+      // hands back a snapshot. A shallow copy keeps `currentTasks` pointing at
+      // the provider's own live task objects, so mutating a task's status
+      // rewrites every blob ever "stored" — and a writer holding a stale blob
+      // looks up to date. That hides staleness bugs in any mutable field.
+      if (patch.metadata) store.metadata = structuredClone(patch.metadata);
     },
   },
 }));
@@ -525,9 +530,9 @@ describe('ClaudeCodeProvider send-now during a sub-agent drain', () => {
   // it. Six writers update this session's metadata; each reads the blob, adds
   // its own field and writes the whole thing back, so any writer that does not
   // carry `backgroundDrain` forward silently reverts it to the pre-drain value.
-  // `emitTaskUpdate` carries it (and says why); `handleSystemInit`,
-  // `emitTodoUpdate`, `emitTaskListUpdate` and `maybeApplyDefaultSessionPhase`
-  // do not. The revert then sticks: emitBackgroundDrainUpdate() early-returns
+  // Every writer that goes through the live-state stamp carries it;
+  // `maybeApplyDefaultSessionPhase` does not go through it at all — it writes a
+  // bare `{ phase }` blob. The revert then sticks: emitBackgroundDrainUpdate() early-returns
   // while `publishedBackgroundDrain` still claims the value is out there, so no
   // correction and no reload event ever follow.
   //
@@ -567,6 +572,69 @@ describe('ClaudeCodeProvider send-now during a sub-agent drain', () => {
     // that this session is working: the flag is the only signal it has.
     expect(internals(provider).drainingBackgroundTasks).toBe(true);
     expect(store.metadata.backgroundDrain).toBe(true);
+
+    provider.abort();
+    await turn.done;
+  }, 20_000);
+
+  // `currentTasks` rides the same blob and has the same exposure, one field
+  // over: a writer holding a pre-terminal snapshot writes the task back as
+  // `running`, and that revert sticks because nothing re-publishes the list
+  // once its own update has already gone out. The session then keeps a spinner
+  // and a counter for work that finished, past a reload — the list is
+  // persisted metadata, not renderer state — and the send-now light reads the
+  // same list and stands red.
+  //
+  // Observed 2026-09-08: two background shells reported terminal in the same
+  // minute; the one that landed outside a drain displayed correctly, the one
+  // that landed inside it kept spinning. The live-state stamp covered exactly
+  // one field of this blob at the time; this is the other. #1269.
+  it('keeps a terminal task terminal when another writer overlaps the update', async () => {
+    published.drain.length = 0;
+    store.metadata = {};
+    store.gate = null;
+    const cli = fakeCliFleet();
+    const provider = new ClaudeCodeProvider();
+
+    const turn = startTurn(provider, 'start the sweep');
+    await waitFor(() => cli[0]?.promptsDelivered.length === 1, 'the first prompt to reach stdin');
+    cli[0]!.emit({ type: 'system', subtype: 'task_started', task_id: 'sweep', description: 'Long background sweep' });
+    await waitFor(
+      () => Array.isArray(store.metadata.currentTasks) && (store.metadata.currentTasks as any[]).length === 1,
+      'the task list to reach the session',
+    );
+
+    // The lead ends and the drain opens while the sweep is still running.
+    cli[0]!.emit({ type: 'result', subtype: 'success', result: 'kicked off', usage: {} });
+    await waitFor(() => internals(provider).drainingBackgroundTasks, 'the lead turn to enter the drain');
+    await waitFor(() => published.drain.at(-1) === true, 'the drain to be published');
+
+    // The drain-closing publish takes its snapshot while the sweep still reads
+    // `running`, and is held there. This is the writer that matters: it closes
+    // the drain, so it is reliably the last one to touch the blob and nothing
+    // re-publishes after it.
+    let openGate = () => {};
+    store.gate = new Promise<void>(resolve => { openGate = resolve; });
+    internals(provider).drainingBackgroundTasks = false;
+    const closingWrite = (provider as unknown as {
+      emitBackgroundDrainUpdate(sessionId: string): Promise<void>;
+    }).emitBackgroundDrainUpdate('session-1');
+    await waitFor(() => store.gate === null, 'the closing writer to take its snapshot');
+
+    // Only now does the sweep report terminal, and that status reaches the store.
+    cli[0]!.emit({ type: 'system', subtype: 'task_notification', task_id: 'sweep', status: 'completed', summary: 'swept' });
+    await waitFor(() => internals(provider).activeTasks.get('sweep')?.status === 'completed', 'the task to settle');
+    await waitFor(
+      () => (store.metadata.currentTasks as Array<{ status: string }> | undefined)?.[0]?.status === 'completed',
+      'the terminal status to reach the session',
+    );
+
+    // The closing publish lands last and writes its stale list over it.
+    openGate();
+    await closingWrite;
+
+    const stored = store.metadata.currentTasks as Array<{ taskId: string; status: string }> | undefined;
+    expect(stored?.find(t => t.taskId === 'sweep')?.status).toBe('completed');
 
     provider.abort();
     await turn.done;
