@@ -40,6 +40,28 @@ export function shouldSettleUnterminatedTurn(args: {
 }
 
 /**
+ * Decide whether a settled queued-prompt chain may end its session.
+ *
+ * The chain's `finally` reports the settle after the last dispatch released the
+ * processing guard, and a background sub-agent drain can wake the same session
+ * and start a fresh turn inside that window. Ending the session then evicts a
+ * live turn from `activeSessions`: `getRunningSessionIds()` stops reporting it,
+ * the renderer's periodic reconcile pins the session to idle, the stop button
+ * turns back into a send arrow, and the next message lands inside the running
+ * turn instead of the queue.
+ *
+ * A busy lead therefore keeps the session tracked. Nothing is stranded by that:
+ * the turn that is still running settles the session through its own completion
+ * handler, the same one that ends every ordinary turn.
+ */
+export function shouldEndSessionOnChainSettle(args: {
+  /** The session's provider reports a lead turn in flight or about to start. */
+  leadBusy: boolean;
+}): boolean {
+  return !args.leadBusy;
+}
+
+/**
  * Decide whether Cancel should force the session's tracked state to idle.
  *
  * `provider.abort()` only unwinds a turn that is still in flight; once the

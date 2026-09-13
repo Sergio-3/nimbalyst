@@ -67,7 +67,7 @@ import {
   safeSend,
 } from './aiServiceUtils';
 import { MessageStreamingHandler } from './MessageStreamingHandler';
-import { shouldForceIdleOnCancel } from './sessionSettlePolicy';
+import { shouldEndSessionOnChainSettle, shouldForceIdleOnCancel } from './sessionSettlePolicy';
 import { HooklessAgentFileWatcher } from './HooklessAgentFileWatcher';
 import { MobileSyncHandler } from './MobileSyncHandler';
 import type { AIServiceContext } from './ipc/AIServiceContext';
@@ -961,10 +961,24 @@ export class AIService {
         // Capture the child's terminal status BEFORE endSession evicts it from
         // the state manager, so onAfterSettled can avoid waking the parent for a
         // child that just failed. getSessionState reads the in-memory map, which
-        // endSession clears on the next line.
+        // the endSession below clears.
         settledChildErrored = stateManager.getSessionState(settledSessionId)?.status === 'error';
-        logger.main.info(`[AIService] ${settledSource}: chain settled for session ${settledSessionId}, ending session`);
-        await stateManager.endSession(settledSessionId);
+        // A background sub-agent drain can wake this session and start a turn in
+        // the moments before this settle runs, and that turn must keep the
+        // session tracked -- see shouldEndSessionOnChainSettle. The sister path
+        // for the same event (subagents:drainSettled in MessageStreamingHandler)
+        // already carries this guard; this one did not.
+        const settledProvider = dispatchSession?.provider
+          ? ProviderFactory.getProvider(dispatchSession.provider as AIProviderType, settledSessionId)
+          : null;
+        const leadBusy = typeof (settledProvider as any)?.isLeadBusy === 'function'
+          && (settledProvider as any).isLeadBusy();
+        if (shouldEndSessionOnChainSettle({ leadBusy })) {
+          logger.main.info(`[AIService] ${settledSource}: chain settled for session ${settledSessionId}, ending session`);
+          await stateManager.endSession(settledSessionId);
+        } else {
+          logger.main.info(`[AIService] ${settledSource}: chain settled for session ${settledSessionId}, but a turn is running — leaving it tracked`);
+        }
         this.hooklessWatcher.scheduleStop(settledSessionId, 500);
       },
       onPromptClaimed: ({ sessionId: claimedSessionId, promptId }) => {
