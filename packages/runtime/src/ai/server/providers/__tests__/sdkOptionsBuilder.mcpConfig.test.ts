@@ -85,6 +85,7 @@ describe('buildSdkOptions MCP config (NIM-2372)', () => {
     const { options } = await buildSdkOptions(deps, makeParams());
 
     expect(options.mcpServers).toEqual({});
+    expect(options.strictMcpConfig).toBeUndefined();
   });
 
   it('passes the snapshot through when there is no lockdown', async () => {
