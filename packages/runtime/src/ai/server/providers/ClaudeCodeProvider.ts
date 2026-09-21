@@ -364,8 +364,11 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
     durationMs: number;
     lastToolName?: string;
     summary?: string;
-    // Set from task_updated patches (is_backgrounded): the task's tool call
-    // returned a launch acknowledgement, not a completion. See NIM-1470.
+    // Set from the CLI's own is_backgrounded report on task_started and
+    // task_updated, and from the launch acknowledgement observed at the
+    // tool_result: the task's tool call returned an acknowledgement, not a
+    // completion. Absent means "no signal", never "foreground". See NIM-1470,
+    // and #1493 for the task_started report.
     isBackgrounded?: boolean;
     /** Generation of the query this task started in. See queryGeneration. */
     queryGeneration?: number;
@@ -3082,6 +3085,10 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
         taskType: chunk.task_type,
         status: 'running',
         startedAt: Date.now(),
+        // The CLI reports foregroundness here for every task it tracks, ordinary
+        // foreground Bash calls included. Preserve the absent case as undefined —
+        // "no signal" is not "backgrounded". See #1493.
+        isBackgrounded: typeof chunk.is_backgrounded === 'boolean' ? chunk.is_backgrounded : undefined,
         toolUseId: chunk.tool_use_id,
         toolCount: 0,
         tokenCount: 0,

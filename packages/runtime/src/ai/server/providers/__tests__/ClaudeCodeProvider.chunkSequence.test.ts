@@ -531,6 +531,113 @@ describe('ClaudeCodeProvider.sendMessage chunk sequence', () => {
     expect(idleMessages).toEqual([]);
   });
 
+  // Regression: a sub-agent resumed with SendMessage is registered as a SECOND
+  // task_started under the same task id, carrying is_backgrounded: true and the
+  // tool_use_id of the SendMessage call rather than the original Task call.
+  // Dropping that flag at task_started made the resumption look like a
+  // foreground Task, and its acknowledgement — {"success":true,"message":
+  // "Resuming agent …"} — is none of the launch wordings the fallback text match
+  // knows. So the task settled on that acknowledgement seconds before the lead's
+  // result, hasRunningTasks() was already false there, the drain never armed,
+  // and the sub-agent's own completion arrived after the loop had broken: the
+  // session went quiet until the user typed something. Upstream c611ae406.
+  it('keeps a sub-agent resumed via SendMessage running so its completion still drains', async () => {
+    const { provider } = await makeProvider();
+    const idleMessages: Array<{ message: string }> = [];
+    provider.on('teammate:messageWhileIdle', (payload) => idleMessages.push(payload));
+
+    // Episode one: launched in the background, reports back within the turn.
+    queryMock.mockImplementation(() =>
+      scriptQueryWithClose([
+        INIT_CHUNK,
+        {
+          type: 'system',
+          subtype: 'task_started',
+          task_id: 'task_1',
+          task_type: 'local_agent',
+          is_backgrounded: true,
+          description: 'audit the drain',
+          tool_use_id: 'toolu_launch',
+        },
+        {
+          type: 'system',
+          subtype: 'task_notification',
+          task_id: 'task_1',
+          status: 'completed',
+          summary: 'first pass done',
+        },
+        { type: 'result', subtype: 'success', is_error: false, num_turns: 2 },
+      ]).query,
+    );
+    await runTurn(provider, 'audit the drain in the background');
+
+    // Episode two: SendMessage resumes the same task id. The CLI registers the
+    // resumption before it answers the tool call, so task_started lands first.
+    const { query, close } = scriptQueryWithClose([
+      INIT_CHUNK,
+      {
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task_1',
+        task_type: 'local_agent',
+        is_backgrounded: true,
+        description: 'audit the drain',
+        tool_use_id: 'toolu_resume',
+      },
+      {
+        type: 'assistant',
+        session_id: 'sdk-session-1',
+        message: {
+          id: 'msg_1',
+          content: [
+            {
+              type: 'tool_use',
+              id: 'toolu_resume',
+              name: 'SendMessage',
+              input: { agentId: 'task_1', message: 'one more pass' },
+            },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_resume',
+              content: '{"success":true,"message":"Resuming agent task_1"}',
+              is_error: false,
+            },
+          ],
+        },
+      },
+      { type: 'result', subtype: 'success', is_error: false, num_turns: 2 },
+      // Reached only by a turn that deferred teardown to drain.
+      {
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'task_1',
+        status: 'completed',
+        summary: 'second pass done',
+      },
+    ]);
+    queryMock.mockImplementation(() => query);
+    idleMessages.length = 0;
+
+    let runningAtComplete: boolean | undefined;
+    await runTurn(provider, 'ask it to keep going', (chunk) => {
+      if (chunk.type === 'complete') {
+        runningAtComplete = (provider as unknown as { hasRunningTasks(): boolean }).hasRunningTasks();
+      }
+    });
+
+    expect(runningAtComplete).toBe(true);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(idleMessages).toHaveLength(1);
+    expect(idleMessages[0].message).toContain('second pass done');
+  });
+
   it('passes the resolved turn inputs through to buildSdkOptions', async () => {
     const { provider } = await makeProvider();
     queryMock.mockImplementation(() =>
