@@ -1412,7 +1412,14 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
                       // launch acknowledgement while it is still running; settling
                       // on it killed the task at turn-end teardown. NIM-1470.
                       if (task.toolUseId !== item.toolUseId) continue;
-                      if (!shouldSettleTaskFromToolResult(task, item.content)) {
+                      // TEMPORARY PROBE -- local diagnostic build only, not for upstream.
+                      // Records what the settle decision actually sees, because the
+                      // claim that a resumed sub-agent dies here rests on the shape of
+                      // this tool_result text, which has only ever been read from the
+                      // transcript, never from the chunk.
+                      const settleProbeDecision = shouldSettleTaskFromToolResult(task, item.content);
+                      console.log(`[CLAUDE-CODE] SETTLE_PROBE_0921: taskId=${task.taskId} shouldSettle=${settleProbeDecision} isBackgrounded=${String(task.isBackgrounded)} status=${task.status} taskType=${task.taskType ?? 'n/a'} resultText="${extractToolResultText(item.content).substring(0, 120).replace(/\n/g, '\\n')}"`);
+                      if (!settleProbeDecision) {
                         // Declining to settle IS the observation that this
                         // tool_result was a launch acknowledgement, and the CLI
                         // does not always send the task_updated patch that sets
