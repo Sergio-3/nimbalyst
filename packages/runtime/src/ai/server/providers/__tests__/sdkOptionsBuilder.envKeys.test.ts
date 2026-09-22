@@ -194,11 +194,20 @@ describe('buildSdkOptions env-key hardening', () => {
 
   it('disables SDK extended thinking for supported Claude Agent models', async () => {
     const { options } = await buildSdkOptions(
-      makeDeps({ config: { thinkingMode: 'disabled' } }),
+      makeDeps({ resolveModelVariant: () => 'claude-opus-5', config: { thinkingMode: 'disabled' } }),
       makeParams()
     );
 
     expect(options.thinking).toEqual({ type: 'disabled' });
+  });
+
+  it.each(['opus', 'claude-opus-5-5', 'claude-opus-5-5[1m]'])('ignores persisted thinking Off for %s while preserving effort', async (model) => {
+    const { options } = await buildSdkOptions(
+      makeDeps({ resolveModelVariant: () => model, config: { thinkingMode: 'disabled', effortLevel: 'high' } }),
+      makeParams(),
+    );
+    expect(options.thinking).toBeUndefined();
+    expect(options.env!.CLAUDE_CODE_EFFORT_LEVEL).toBe('high');
   });
 
   it('omits the SDK thinking option when extended thinking is enabled', async () => {

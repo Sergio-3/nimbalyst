@@ -247,32 +247,29 @@ export const OPENAI_MODELS: ModelDefinition[] = [
  * display a stale "Opus 4.6" after the runtime was bumped to 4.7.
  *
  * Two kinds of variants:
- * - Canonical variants (`opus`, `sonnet`, `haiku`) — the SDK resolves these
- *   to the latest underlying model. The version field is for display only.
+ * - Canonical variants (`opus`, `sonnet`, `haiku`) — current-generation rows.
+ *   Explicit SDK mappings pin Opus/Fable to the displayed release; other
+ *   aliases are resolved by the SDK.
  * - Pinned variants (`opus-4-6`, ...) — always resolve to a specific
  *   Anthropic model ID via `CLAUDE_CODE_PINNED_SDK_MODELS`. Used to keep
  *   the previous-generation Opus selectable after bumping the canonical
  *   `opus` to the next version.
  */
-export type ClaudeCodeVariant = 'fable' | 'fable-5' | 'opus' | 'sonnet' | 'haiku' | 'opus-4-8' | 'opus-4-7' | 'opus-4-6' | 'sonnet-4-6';
-export type ClaudeCodeVariantInput = ClaudeCodeVariant | 'opus-5' | 'sonnet-5' | 'fable-5-1';
+export type ClaudeCodeVariant = 'fable' | 'fable-5' | 'opus' | 'opus-5' | 'sonnet' | 'haiku' | 'opus-4-8' | 'opus-4-7' | 'opus-4-6' | 'sonnet-4-6';
+export type ClaudeCodeVariantInput = ClaudeCodeVariant | 'opus-5-5' | 'sonnet-5' | 'fable-5-1';
 
 /**
  * Accepted input aliases for Claude Agent model identifiers.
  *
- * `opus-5` is intentionally accepted as an alias for the canonical `opus`
- * variant so legacy code paths (meta-agent, Agent tool, imported session IDs)
- * can request the current Opus generation explicitly without requiring a
- * duplicate visible picker entry. `sonnet-5` and `fable-5` are accepted as
- * aliases for `sonnet` and `fable` for the same reason.
- * `opus-4-8` is now a pinned previous-generation
- * variant (its own row), not an alias — it resolves to that specific model.
+ * `opus-5-5`, `sonnet-5`, and `fable-5-1` normalize to their canonical
+ * picker entries. Older version inputs remain pinned to that generation.
  */
 export const CLAUDE_CODE_ACCEPTED_VARIANT_INPUTS: readonly ClaudeCodeVariantInput[] = [
   'fable',
   'fable-5-1',
   'fable-5',
   'opus',
+  'opus-5-5',
   'opus-5',
   'opus-4-8',
   'opus-4-7',
@@ -288,7 +285,8 @@ const CLAUDE_CODE_VARIANT_INPUT_MAP: Readonly<Record<ClaudeCodeVariantInput, Cla
   'fable-5-1': 'fable',
   'fable-5': 'fable-5',
   opus: 'opus',
-  'opus-5': 'opus',
+  'opus-5-5': 'opus',
+  'opus-5': 'opus-5',
   'opus-4-8': 'opus-4-8',
   'opus-4-7': 'opus-4-7',
   'opus-4-6': 'opus-4-6',
@@ -305,7 +303,8 @@ export function normalizeClaudeCodeVariant(variant: string): ClaudeCodeVariant |
 export const CLAUDE_CODE_VARIANT_VERSIONS: Record<ClaudeCodeVariant, string> = {
   fable: '5.1',
   'fable-5': '5',
-  opus: '5',
+  opus: '5.5',
+  'opus-5': '5',
   sonnet: '5',
   haiku: '4.5',
   'opus-4-8': '4.8',
@@ -318,6 +317,7 @@ export const CLAUDE_CODE_MODEL_LABELS: Record<ClaudeCodeVariant, string> = {
   fable: 'Fable',
   'fable-5': 'Fable',
   opus: 'Opus',
+  'opus-5': 'Opus',
   sonnet: 'Sonnet',
   haiku: 'Haiku',
   'opus-4-8': 'Opus',
@@ -332,6 +332,8 @@ export const CLAUDE_CODE_MODEL_LABELS: Record<ClaudeCodeVariant, string> = {
  * string (or missing entry) means "pass the variant name straight through".
  */
 export const CLAUDE_CODE_PINNED_SDK_MODELS: Partial<Record<ClaudeCodeVariant, string>> = {
+  opus: 'claude-opus-5-5',
+  'opus-5': 'claude-opus-5',
   fable: 'claude-fable-5-1',
   'fable-5': 'claude-fable-5',
   'opus-4-8': 'claude-opus-4-8',
@@ -341,6 +343,16 @@ export const CLAUDE_CODE_PINNED_SDK_MODELS: Partial<Record<ClaudeCodeVariant, st
   // canonical `sonnet` alias rolled forward to Sonnet 5.
   'sonnet-4-6': 'claude-sonnet-4-6',
 };
+
+/** Shared UI/SDK gate: Opus 5.5 and Fable require adaptive thinking. */
+export function canDisableClaudeThinking(model: string | undefined): boolean {
+  if (!model) return false;
+  const raw = model.trim().toLowerCase().split(':').pop()!.replace(/(?:-1m|\[1m\])$/, '');
+  const variant = normalizeClaudeCodeVariant(raw);
+  const resolved = variant ? (CLAUDE_CODE_PINNED_SDK_MODELS[variant] ?? variant) : raw;
+  return /^(?:claude-)?sonnet(?:-|$)/.test(resolved)
+    || /^claude-opus-(?:4(?:-|$)|5(?:$|-\d{8}$))/.test(resolved);
+}
 
 /**
  * Variants whose PLAIN (non-`[1m]`) row is seeded at a 1M context window.
@@ -373,6 +385,7 @@ export const CLAUDE_CODE_NATIVE_1M_VARIANTS: readonly ClaudeCodeVariant[] = [
   'fable',
   'fable-5',
   'opus',
+  'opus-5',
   'sonnet',
   'opus-4-8',
   'opus-4-7',
@@ -397,9 +410,8 @@ export const CLAUDE_CODE_NATIVE_1M_VARIANTS: readonly ClaudeCodeVariant[] = [
  *   - `sonnet` is excluded — Sonnet 5 has no 200K variant on the Anthropic API
  *     and no `[1m]` suffix to select, so the row would be a dead option.
  *   - `haiku` has no 1M window.
- *   - the pinned legacy variants are excluded because `resolveClaudeCliModelArg`
- *     collapses every `opus*` variant to the bare `opus` alias, so an
- *     `opus-4-7-1m` row would run Opus 5 at 1M while claiming to be Opus 4.7.
+ *   - pinned legacy variants retain their existing single picker row. Explicit
+ *     saved `-1m` selections still resolve to the pinned ID with `[1m]`.
  */
 export const CLAUDE_CODE_VARIANTS_WITH_1M: readonly ClaudeCodeVariant[] = ['opus', 'fable'];
 

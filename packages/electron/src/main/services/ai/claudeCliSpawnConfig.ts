@@ -18,7 +18,7 @@
  */
 
 import { ModelIdentifier } from '@nimbalyst/runtime/ai/server/types';
-import { normalizeClaudeCodeVariant } from '@nimbalyst/runtime/ai/modelConstants';
+import { normalizeClaudeCodeVariant, CLAUDE_CODE_PINNED_SDK_MODELS } from '@nimbalyst/runtime/ai/modelConstants';
 
 /**
  * Resolve a Nimbalyst model id to the alias the genuine `claude` CLI accepts for
@@ -48,17 +48,8 @@ export function resolveClaudeCliModelArg(model: string | undefined): string | un
 
   const variant = normalizeClaudeCodeVariant(variantInput);
   if (variant) {
-    // The CLI accepts canonical aliases (fable, opus, sonnet, haiku) and full
-    // model ids (claude-fable-5, claude-opus-4-7). For pinned variants the
-    // CLI doesn't accept as short aliases, pass the full model id instead.
-    let alias: string;
-    if (variant.startsWith('opus')) {
-      alias = 'opus';
-    } else if (variant === 'fable-5') {
-      alias = 'claude-fable-5';
-    } else {
-      alias = variant;
-    }
+    // Share the SDK mapping so explicit versions never collapse to "latest".
+    const alias = CLAUDE_CODE_PINNED_SDK_MODELS[variant] ?? variant;
     return isExtended ? `${alias}[1m]` : alias;
   }
 

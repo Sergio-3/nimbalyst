@@ -115,8 +115,7 @@ describe('1M variant lists', () => {
   it('offers -1m rows for the dateless opus/fable aliases only', () => {
     // sonnet: Sonnet 5 has no 200K variant and no `[1m]` suffix — a dead row.
     // haiku: no 1M window.
-    // pinned legacy: `resolveClaudeCliModelArg` collapses every `opus*` variant to
-    // bare `opus`, so an `opus-4-7-1m` row would run Opus 5 while claiming 4.7.
+    // Pinned legacy models retain their existing single picker row.
     expect([...CLAUDE_CODE_VARIANTS_WITH_1M].sort()).toEqual(['fable', 'opus']);
   });
 

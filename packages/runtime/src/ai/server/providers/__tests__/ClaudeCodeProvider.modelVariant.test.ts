@@ -4,6 +4,12 @@ import { resolveClaudeCodeModelVariant } from '../../types';
 const DEFAULT_MODEL = 'claude-code:opus-1m';
 
 describe('resolveClaudeCodeModelVariant', () => {
+  it.each(['claude-code', 'claude-code-cli'])('resolves explicit 5.5 and preserves Opus 5 for %s', (provider) => {
+    expect(resolveClaudeCodeModelVariant(`${provider}:opus-5-5`, DEFAULT_MODEL)).toBe('claude-opus-5-5');
+    expect(resolveClaudeCodeModelVariant(`${provider}:opus-5-5-1m`, DEFAULT_MODEL)).toBe('claude-opus-5-5[1m]');
+    expect(resolveClaudeCodeModelVariant(`${provider}:opus-5`, DEFAULT_MODEL)).toBe('claude-opus-5');
+  });
+
   describe('standard variants (no extended context)', () => {
     it('resolves sonnet variant', () => {
       expect(resolveClaudeCodeModelVariant('claude-code:sonnet', DEFAULT_MODEL)).toBe('sonnet');
@@ -14,7 +20,7 @@ describe('resolveClaudeCodeModelVariant', () => {
     });
 
     it('resolves opus variant', () => {
-      expect(resolveClaudeCodeModelVariant('claude-code:opus', DEFAULT_MODEL)).toBe('opus');
+      expect(resolveClaudeCodeModelVariant('claude-code:opus', DEFAULT_MODEL)).toBe('claude-opus-5-5');
     });
 
     it('resolves haiku variant', () => {
@@ -34,11 +40,11 @@ describe('resolveClaudeCodeModelVariant', () => {
     });
 
     it('uses default model when config model is undefined', () => {
-      expect(resolveClaudeCodeModelVariant(undefined, DEFAULT_MODEL)).toBe('opus[1m]');
+      expect(resolveClaudeCodeModelVariant(undefined, DEFAULT_MODEL)).toBe('claude-opus-5-5[1m]');
     });
 
     it('uses default model when config model is empty string', () => {
-      expect(resolveClaudeCodeModelVariant('', DEFAULT_MODEL)).toBe('opus[1m]');
+      expect(resolveClaudeCodeModelVariant('', DEFAULT_MODEL)).toBe('claude-opus-5-5[1m]');
     });
   });
 
@@ -53,9 +59,9 @@ describe('resolveClaudeCodeModelVariant', () => {
       expect(result).toBe('sonnet[1m]');
     });
 
-    it('opus-1m resolves to opus[1m]', () => {
+    it('opus-1m resolves to pinned 5.5 with [1m]', () => {
       const result = resolveClaudeCodeModelVariant('claude-code:opus-1m', DEFAULT_MODEL);
-      expect(result).toBe('opus[1m]');
+      expect(result).toBe('claude-opus-5-5[1m]');
     });
 
     it('haiku-1m resolves to haiku[1m]', () => {
@@ -63,9 +69,9 @@ describe('resolveClaudeCodeModelVariant', () => {
       expect(result).toBe('haiku[1m]');
     });
 
-    it('opus-5-1m alias resolves to opus[1m]', () => {
+    it('opus-5-1m preserves the previous generation with [1m]', () => {
       const result = resolveClaudeCodeModelVariant('claude-code:opus-5-1m', DEFAULT_MODEL);
-      expect(result).toBe('opus[1m]');
+      expect(result).toBe('claude-opus-5[1m]');
     });
 
     it('opus-4-8-1m pinned variant resolves to claude-opus-4-8[1m]', () => {
@@ -76,8 +82,8 @@ describe('resolveClaudeCodeModelVariant', () => {
 
   describe('SDK compatibility', () => {
     it('standard variants are valid SDK model values', () => {
-      const validSdkValues = ['sonnet', 'opus', 'haiku'];
-      for (const variant of validSdkValues) {
+      const validSdkValues = ['sonnet', 'claude-opus-5-5', 'haiku'];
+      for (const variant of ['sonnet', 'opus', 'haiku']) {
         const result = resolveClaudeCodeModelVariant(`claude-code:${variant}`, DEFAULT_MODEL);
         expect(validSdkValues).toContain(result);
       }
@@ -156,11 +162,11 @@ describe('resolveClaudeCodeModelVariant', () => {
     });
 
     it('handles raw variant names with -1m suffix', () => {
-      expect(resolveClaudeCodeModelVariant('opus-1m', DEFAULT_MODEL)).toBe('opus[1m]');
+      expect(resolveClaudeCodeModelVariant('opus-1m', DEFAULT_MODEL)).toBe('claude-opus-5-5[1m]');
     });
 
-    it('accepts raw opus-5 alias without provider prefix', () => {
-      expect(resolveClaudeCodeModelVariant('opus-5', DEFAULT_MODEL)).toBe('opus');
+    it('accepts raw pinned opus-5 without provider prefix', () => {
+      expect(resolveClaudeCodeModelVariant('opus-5', DEFAULT_MODEL)).toBe('claude-opus-5');
     });
 
     it('accepts raw pinned opus-4-8 variant without provider prefix', () => {

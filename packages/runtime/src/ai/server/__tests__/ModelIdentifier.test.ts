@@ -37,8 +37,8 @@ describe('ModelIdentifier', () => {
       expect(id.isExtendedContext).toBe(true);
     });
 
-    it('normalizes claude-code opus-5 alias to canonical opus', () => {
-      const id = ModelIdentifier.parse('claude-code:opus-5-1m');
+    it('normalizes claude-code opus-5-5 alias to canonical opus', () => {
+      const id = ModelIdentifier.parse('claude-code:opus-5-5-1m');
       expect(id.provider).toBe('claude-code');
       expect(id.model).toBe('opus-1m');
       expect(id.combined).toBe('claude-code:opus-1m');
@@ -119,11 +119,18 @@ describe('ModelIdentifier', () => {
       expect(id.isExtendedContext).toBe(true);
     });
 
-    it('accepts explicit opus-5 alias and normalizes to canonical opus', () => {
-      const id = ModelIdentifier.create('claude-code', 'Opus-5');
+    it('accepts explicit opus-5-5 alias and normalizes to canonical opus', () => {
+      const id = ModelIdentifier.create('claude-code', 'Opus-5-5');
       expect(id.provider).toBe('claude-code');
       expect(id.model).toBe('opus');
       expect(id.combined).toBe('claude-code:opus');
+    });
+
+    it.each(['claude-code', 'claude-code-cli'] as const)('preserves an explicit Opus 5 selection for %s', (provider) => {
+      const id = ModelIdentifier.create(provider, 'Opus-5-1M');
+      expect(id.combined).toBe(`${provider}:opus-5-1m`);
+      expect(id.baseVariant).toBe('opus-5');
+      expect(id.isExtendedContext).toBe(true);
     });
 
     it('preserves the explicit pinned opus-4-8 variant', () => {

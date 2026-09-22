@@ -14,23 +14,23 @@ import {
  * claudeCliSubmit, since a single `text + \r` write can leave the Ink TUI
  * showing the text without consuming Enter). Values reuse
  * resolveClaudeCliModelArg so the picker's combined ids map to the CLI's own
- * aliases (`fable`, `opus[1m]`, ...).
+ * aliases (`fable`, `claude-opus-5-5[1m]`, ...).
  */
 describe('buildClaudeCliModelSwitchCommand', () => {
   it('maps the fable combined id to /model fable', () => {
-    expect(buildClaudeCliModelSwitchCommand('claude-code-cli:fable')).toBe('/model fable');
+    expect(buildClaudeCliModelSwitchCommand('claude-code-cli:fable')).toBe('/model claude-fable-5-1');
   });
 
   it('maps fable-1m to the CLI 1M form', () => {
-    expect(buildClaudeCliModelSwitchCommand('claude-code-cli:fable-1m')).toBe('/model fable[1m]');
+    expect(buildClaudeCliModelSwitchCommand('claude-code-cli:fable-1m')).toBe('/model claude-fable-5-1[1m]');
   });
 
   it('maps opus-1m to the CLI 1M alias', () => {
-    expect(buildClaudeCliModelSwitchCommand('claude-code-cli:opus-1m')).toBe('/model opus[1m]');
+    expect(buildClaudeCliModelSwitchCommand('claude-code-cli:opus-1m')).toBe('/model claude-opus-5-5[1m]');
   });
 
-  it('collapses pinned opus variants to the opus alias', () => {
-    expect(buildClaudeCliModelSwitchCommand('claude-code-cli:opus-4-7')).toBe('/model opus');
+  it('keeps pinned opus versions when switching', () => {
+    expect(buildClaudeCliModelSwitchCommand('claude-code-cli:opus-4-7')).toBe('/model claude-opus-4-7');
   });
 
   it('rejects non-claude combined ids', () => {
@@ -63,8 +63,8 @@ describe('switchClaudeCliModel', () => {
       { sessionId: 's1', model: 'claude-code-cli:fable' },
       deps,
     );
-    expect(result).toEqual({ switched: true, cliArg: 'fable' });
-    expect(writes).toEqual(['/model fable', '\r']);
+    expect(result).toEqual({ switched: true, cliArg: 'claude-fable-5-1' });
+    expect(writes).toEqual(['/model claude-fable-5-1', '\r']);
     expect(deps.delay).toHaveBeenCalledWith(MODEL_SWITCH_WRITE_GAP_MS);
   });
 
@@ -83,9 +83,9 @@ describe('switchClaudeCliModel', () => {
           'Switch model?\n  1. Yes, switch to Opus 5 (1M context)\n  2. No, go back',
       },
     );
-    expect(result).toEqual({ switched: true, cliArg: 'opus[1m]', confirmed: true });
+    expect(result).toEqual({ switched: true, cliArg: 'claude-opus-5-5[1m]', confirmed: true });
     // command, Enter, then the confirmation Enter accepting the highlighted Yes
-    expect(writes).toEqual(['/model opus[1m]', '\r', '\r']);
+    expect(writes).toEqual(['/model claude-opus-5-5[1m]', '\r', '\r']);
   });
 
   it('does not send a confirmation Enter when no dialog appeared', async () => {
@@ -94,7 +94,7 @@ describe('switchClaudeCliModel', () => {
       { sessionId: 's1', model: 'claude-code-cli:fable' },
       { ...deps, readRecentOutput: () => 'ordinary output, no dialog' },
     );
-    expect(writes).toEqual(['/model fable', '\r']);
+    expect(writes).toEqual(['/model claude-fable-5-1', '\r']);
   });
 
   it('does not touch the PTY for an unresolvable model', async () => {

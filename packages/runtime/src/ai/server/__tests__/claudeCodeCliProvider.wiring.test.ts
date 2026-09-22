@@ -67,7 +67,7 @@ describe('claude-code-cli provider wiring (Phase 0)', () => {
 
   describe('resolveClaudeCodeModelVariant accepts claude-code-cli', () => {
     it('resolves a plain variant', () => {
-      expect(resolveClaudeCodeModelVariant('claude-code-cli:opus', 'opus')).toBe('opus');
+      expect(resolveClaudeCodeModelVariant('claude-code-cli:opus', 'opus')).toBe('claude-opus-5-5');
     });
 
     it('appends the [1m] beta marker for extended context', () => {
