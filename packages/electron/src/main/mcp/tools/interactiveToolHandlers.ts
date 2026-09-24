@@ -1534,6 +1534,7 @@ export async function handleRequestUserInput(
             acceptedIds: promptIdAliasSet,
             notBefore: responseNotBefore,
             matchAnyId,
+            waiterPromptId: promptId,
           });
           if (!content) return;
           if (content.cancelled) {

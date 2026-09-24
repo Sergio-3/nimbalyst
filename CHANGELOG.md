@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The "waiting for your response" marker on a session now appears as soon as the question is asked and clears as soon as you answer, instead of only showing up once you open the session and lingering until the turn ends.
 - An AskUserQuestion or PromptForUserInput form no longer stays stuck on a request the agent had already dropped.
 - The installed app no longer opens a local debugging port that let any program on the machine control it.
+- An answer to a PromptForUserInput form no longer lands in a different form of the same session.
 
 ### Removed
 <!-- Removed features go here -->
