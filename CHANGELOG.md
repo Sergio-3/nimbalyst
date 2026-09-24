@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sending a message while background sub-agents are still working no longer kills them; the follow-up turn continues in the same session, and the session row keeps showing that work is still running.
 - The "waiting for your response" marker on a session now appears as soon as the question is asked and clears as soon as you answer, instead of only showing up once you open the session and lingering until the turn ends.
 - An AskUserQuestion or PromptForUserInput form no longer stays stuck on a request the agent had already dropped.
+- The installed app no longer opens a local debugging port that let any program on the machine control it.
 
 ### Removed
 <!-- Removed features go here -->
