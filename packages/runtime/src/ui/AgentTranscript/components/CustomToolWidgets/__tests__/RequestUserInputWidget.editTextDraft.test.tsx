@@ -12,7 +12,7 @@
 
 import React from 'react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, act } from '@testing-library/react';
+import { render, screen, act, fireEvent } from '@testing-library/react';
 import { Provider as JotaiProvider } from 'jotai';
 import { store } from '../../../../../store/store';
 import { setInteractiveWidgetHost } from '../../../../../store/atoms/interactiveWidgetHost';
@@ -116,5 +116,36 @@ describe('RequestUserInputWidget closed states', () => {
     renderClosed('{"answers":{},"cancelled":true}');
     screen.getByTestId('request-user-input-cancelled');
     expect(screen.queryByTestId('request-user-input-skipped')).toBeNull();
+  });
+});
+
+// The host rejects an answer the session cannot take (already answered, already
+// on its way, could not be queued). The form must stay usable, keep the draft
+// and say why, instead of claiming "Submitted" or "Cancelled".
+describe('RequestUserInputWidget when the host rejects the answer', () => {
+  const REASON = 'This answer is already on its way to the session.';
+
+  beforeEach(() => {
+    clearRequestUserInputDraft(PROMPT_ID);
+    setInteractiveWidgetHost(SESSION_ID, {
+      requestUserInputSubmit: vi.fn().mockRejectedValue(new Error(REASON)),
+      requestUserInputCancel: vi.fn().mockRejectedValue(new Error(REASON)),
+    } as unknown as InteractiveWidgetHost);
+  });
+
+  it.each([
+    ['submit', 'request-user-input-submit'],
+    ['cancel', 'request-user-input-cancel'],
+  ])('stays open with the draft and the reason after a rejected %s', async (_action, button) => {
+    renderWidget();
+    await act(async () => {});
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId(button));
+    });
+
+    expect(screen.getByTestId('request-user-input-widget').getAttribute('data-state')).toBe('pending');
+    expect(draftText()).toBe(SEED);
+    expect(screen.getByTestId('request-user-input-error').textContent).toBe(REASON);
   });
 });

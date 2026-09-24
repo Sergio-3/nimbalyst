@@ -863,6 +863,7 @@ export const RequestUserInputWidget: React.FC<CustomToolWidgetProps> = ({ messag
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [hasResponded, setHasResponded] = useState(false);
   const [localResult, setLocalResult] = useState<{ answers: Record<string, RequestUserInputAnswer>; cancelled?: boolean } | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const allValid = useMemo(() => {
     if (!args) return false;
@@ -873,6 +874,7 @@ export const RequestUserInputWidget: React.FC<CustomToolWidgetProps> = ({ messag
     if (!host || !args || hasResponded || !isPending || !allValid) return;
     const answers = draftToAnswers(args, draft);
     setIsSubmitting(true);
+    setSubmitError(null);
     setLocalResult({ answers });
     setHasResponded(true);
     try {
@@ -882,6 +884,7 @@ export const RequestUserInputWidget: React.FC<CustomToolWidgetProps> = ({ messag
       console.error('[RequestUserInputWidget] Failed to submit:', error);
       setLocalResult(null);
       setHasResponded(false);
+      setSubmitError(error instanceof Error ? error.message : String(error));
     } finally {
       setIsSubmitting(false);
     }
@@ -890,6 +893,7 @@ export const RequestUserInputWidget: React.FC<CustomToolWidgetProps> = ({ messag
   const handleCancel = useCallback(async () => {
     if (!host || hasResponded || !isPending) return;
     setIsSubmitting(true);
+    setSubmitError(null);
     setLocalResult({ answers: {}, cancelled: true });
     setHasResponded(true);
     try {
@@ -897,6 +901,9 @@ export const RequestUserInputWidget: React.FC<CustomToolWidgetProps> = ({ messag
       clearRequestUserInputDraft(promptId);
     } catch (error) {
       console.error('[RequestUserInputWidget] Failed to cancel:', error);
+      setLocalResult(null);
+      setHasResponded(false);
+      setSubmitError(error instanceof Error ? error.message : String(error));
     } finally {
       setIsSubmitting(false);
     }
@@ -1061,6 +1068,11 @@ export const RequestUserInputWidget: React.FC<CustomToolWidgetProps> = ({ messag
             </button>
           </div>
         </div>
+        {submitError && (
+          <div data-testid="request-user-input-error" className="request-user-input-error text-xs text-nim-error">
+            {submitError}
+          </div>
+        )}
       </div>
     </div>
   );
