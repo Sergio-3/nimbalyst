@@ -16,6 +16,7 @@ const { ipcMainStub, windowSends, mocks } = await vi.hoisted(async () => {
       settleTurnState: hoistedVi.fn(async (_args: unknown) => {}),
       create: hoistedVi.fn(async (row: any) => row),
       query: hoistedVi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [] })),
+      list: hoistedVi.fn(async (_sessionId: string, _options?: unknown): Promise<any[]> => []),
     },
   };
 });
@@ -61,7 +62,7 @@ vi.mock('@nimbalyst/runtime/storage/repositories/AgentMessagesRepository', () =>
   AgentMessagesRepository: {
     create: mocks.create,
     listTail: async () => [],
-    list: async () => [],
+    list: mocks.list,
   },
 }));
 // The answer goes through the real `messages:respond-to-prompt` handler; these
@@ -493,6 +494,70 @@ describe('PromptForUserInput after its MCP connection dropped', () => {
         .map(([row]) => String(row.content))
         .filter((content) => content.includes('nimbalyst_tool_result') && content.includes('farbe')),
     ).toEqual([]);
+  });
+});
+
+// An answer can be stored before its waiter exists: the form is shown by the
+// transcript while the MCP call is still starting. The waiter picks it up once
+// when it registers, by its own tool-use id only.
+describe('PromptForUserInput answered before its waiter', () => {
+  const sessionId = 'sdk-session-early-answer';
+  const pending: Array<Promise<any>> = [];
+
+  afterEach(async () => {
+    for (const id of ['toolu_X', 'toolu_Y']) {
+      ipcMainStub.emit(`request-user-input-response:${sessionId}:${id}`, {}, { cancelled: true });
+    }
+    await Promise.all(pending.splice(0));
+    ipcMainStub.removeAllListeners();
+    mocks.list.mockReset();
+    mocks.list.mockResolvedValue([]);
+  });
+
+  function storedAnswer(promptId: string, choice: string, secondsAgo: number) {
+    return {
+      sessionId,
+      direction: 'output',
+      source: 'nimbalyst',
+      createdAt: new Date(Date.now() - secondsAgo * 1000),
+      content: JSON.stringify({
+        type: 'request_user_input_response',
+        promptId,
+        answers: { farbe: { type: 'singleSelect', selectedId: choice } },
+        cancelled: false,
+        respondedBy: 'desktop',
+      }),
+    };
+  }
+
+  function openPrompt(toolUseId: string) {
+    const call = handleRequestUserInput(
+      { fields: [{ type: 'singleSelect', id: 'farbe', label: 'Farbe', options: [{ id: 'rot', label: 'Rot' }, { id: 'blau', label: 'Blau' }] }] },
+      sessionId,
+      undefined,
+      { params: { _meta: { 'claudecode/toolUseId': toolUseId } } },
+    );
+    pending.push(call);
+    return Promise.race([call, new Promise((resolve) => setTimeout(() => resolve('still waiting'), 300))]);
+  }
+
+  it('settles at once with the newest stored answer for its own id', async () => {
+    mocks.list.mockResolvedValue([
+      storedAnswer('toolu_X', 'rot', 9),
+      storedAnswer('toolu_Y', 'gruen', 8),
+      storedAnswer('toolu_X', 'blau', 7),
+    ]);
+
+    const result: any = await openPrompt('toolu_X');
+
+    expect(result).not.toBe('still waiting');
+    expect(JSON.parse(result.content[0].text).answers).toEqual({ farbe: { type: 'singleSelect', selectedId: 'blau' } });
+  });
+
+  it('leaves a stored answer for another id alone', async () => {
+    mocks.list.mockResolvedValue([storedAnswer('toolu_Y', 'gruen', 8)]);
+
+    expect(await openPrompt('toolu_X')).toBe('still waiting');
   });
 });
 

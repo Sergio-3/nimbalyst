@@ -38,6 +38,7 @@ import { getPermissionService } from "../../services/PermissionService";
 import { SessionCommitService } from "../../services/SessionCommitService";
 import { scopeProposalToRepo } from "../../services/workspaceRepos";
 import { findFreshInteractiveResponse } from "./interactiveResponsePolling";
+import { loadPromptAnswerFacts } from "../../services/ai/requestUserInputResumption";
 import {
   clearPendingInteractiveWaiter,
   countPendingInteractiveWaiters,
@@ -1501,6 +1502,27 @@ export async function handleRequestUserInput(
       toolName: 'PromptForUserInput',
       onAbort: () => { void settle({ cancelled: true }, 'client-abort', 'client-abandoned'); },
     });
+
+    // The form can be answered while this call is still starting; that answer
+    // was stored before `responseNotBefore` and the poll skips it. Pick it up
+    // once, by this call's own Claude tool-use id. Later answers arrive on the
+    // channels registered above.
+    if (sessionId && promptId.startsWith("toolu_")) {
+      void loadPromptAnswerFacts(sessionId, promptId)
+        .then((facts) => {
+          const stored = facts.responses[facts.responses.length - 1];
+          if (!stored) return;
+          settle(
+            stored.cancelled
+              ? { cancelled: true, respondedBy: stored.respondedBy }
+              : { answers: stored.answers, respondedBy: stored.respondedBy },
+            "stored-answer",
+          );
+        })
+        .catch((error) => {
+          console.warn("[MCP Server] PromptForUserInput: failed to read a stored answer:", error);
+        });
+    }
 
     // Database polling fallback for resilience to IPC drops.
     if (sessionId) {
