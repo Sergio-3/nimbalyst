@@ -3,13 +3,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
 
-const { ipcMainStub, windowSends } = await vi.hoisted(async () => {
+const { ipcMainStub, windowSends, mocks } = await vi.hoisted(async () => {
   const { EventEmitter: E } = await import('events');
+  const { vi: hoistedVi } = await import('vitest');
   const emitter = new E();
   emitter.setMaxListeners(0);
   return {
     ipcMainStub: emitter,
     windowSends: [] as Array<{ channel: string; payload: any }>,
+    mocks: {
+      handlers: new Map<string, (...args: any[]) => any>(),
+      settleTurnState: hoistedVi.fn(async (_args: unknown) => {}),
+      create: hoistedVi.fn(async (row: any) => row),
+      query: hoistedVi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [] })),
+    },
   };
 });
 
@@ -48,7 +55,29 @@ vi.mock('../tools/interactivePromptTranscript', async (importOriginal) => ({
   isClaudeCliSession: async () => false,
 }));
 vi.mock('../tools/interactivePromptSettleState', () => ({
-  applyInteractivePromptSettleTurnState: async () => {},
+  applyInteractivePromptSettleTurnState: mocks.settleTurnState,
+}));
+vi.mock('@nimbalyst/runtime/storage/repositories/AgentMessagesRepository', () => ({
+  AgentMessagesRepository: {
+    create: mocks.create,
+    listTail: async () => [],
+    list: async () => [],
+  },
+}));
+// The answer goes through the real `messages:respond-to-prompt` handler; these
+// stubs give it a registry, a database that accepts the response row, and a tray.
+vi.mock('../../utils/ipcRegistry', () => ({
+  safeHandle: (name: string, fn: any) => mocks.handlers.set(name, fn),
+  safeOn: () => {},
+}));
+vi.mock('../../database/PGLiteDatabaseWorker', () => ({
+  database: { query: mocks.query },
+}));
+vi.mock('../../tray/TrayManager', () => ({
+  TrayManager: { getInstance: () => ({ onPromptResolved() {} }) },
+}));
+vi.mock('../../services/RepositoryManager', () => ({
+  getQueuedPromptsStore: () => ({}),
 }));
 vi.mock('../../services/ai/pendingPromptPersistence', () => ({
   setSessionPendingPrompt: async () => {},
@@ -75,7 +104,10 @@ import {
 import {
   getInteractiveToolSchemas,
   handleAskUserQuestion,
+  handleRequestUserInput,
 } from '../tools/interactiveToolHandlers';
+import { registerSessionPromptResponseHandler } from '../../ipc/sessionPromptResponseHandler';
+import { openSseMcpConnection, type SseMcpConnection } from './sseMcpConnection';
 
 const ipc = new EventEmitter();
 
@@ -405,6 +437,80 @@ describe('RequestUserInput lifecycle', () => {
       expect(tool?.annotations?.readOnlyHint).toBe(true);
     },
   );
+});
+
+// Shared setup for a PromptForUserInput call whose MCP connection drops: the
+// real handler behind the real SSE wiring, answered afterwards through the real
+// `messages:respond-to-prompt` handler, as the form does.
+describe('PromptForUserInput after its MCP connection dropped', () => {
+  const sessionId = 'sdk-session-dropped-prompt';
+  let connection: SseMcpConnection | undefined;
+
+  beforeEach(() => {
+    mocks.settleTurnState.mockClear();
+    mocks.create.mockClear();
+    mocks.query.mockClear();
+  });
+
+  afterEach(async () => {
+    await connection?.close();
+    connection = undefined;
+    ipcMainStub.removeAllListeners();
+    vi.restoreAllMocks();
+  });
+
+  async function openPromptAndDropConnection(toolUseId: string) {
+    const onClosed = vi.fn();
+    connection = await openSseMcpConnection({
+      onClosed,
+      onCall: (request, extra) =>
+        handleRequestUserInput(request.params.arguments, sessionId, undefined, request, extra),
+    });
+    await connection.post({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'PromptForUserInput',
+        arguments: {
+          fields: [
+            { type: 'singleSelect', id: 'farbe', label: 'Farbe', options: [{ id: 'rot', label: 'Rot' }, { id: 'blau', label: 'Blau' }] },
+          ],
+        },
+        _meta: { 'claudecode/toolUseId': toolUseId },
+      },
+    });
+    const channel = `request-user-input-response:${sessionId}:${toolUseId}`;
+    await vi.waitFor(() => expect(ipcMainStub.listenerCount(channel)).toBe(1), { timeout: 2000 });
+
+    connection.drop();
+    await vi.waitFor(() => expect(onClosed).toHaveBeenCalledTimes(1), { timeout: 2000 });
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  async function submitThroughHandler(toolUseId: string, answers: Record<string, unknown>) {
+    registerSessionPromptResponseHandler();
+    return mocks.handlers.get('messages:respond-to-prompt')!(
+      { sender: { send: vi.fn() } },
+      { sessionId, promptId: toolUseId, promptType: 'request_user_input_request', response: { answers }, respondedBy: 'desktop' },
+    );
+  }
+
+  it('settles as abandoned, leaves the session state alone and writes no answer', async () => {
+    const log = vi.spyOn(console, 'log');
+    await openPromptAndDropConnection('toolu_X');
+    await submitThroughHandler('toolu_X', { farbe: { type: 'singleSelect', selectedId: 'rot' } });
+
+    expect(
+      log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes('PromptForUserInput settled via')),
+    ).toEqual(['[MCP Server] PromptForUserInput settled via client-abort: promptId=toolu_X, cancelled=true']);
+    expect(mocks.settleTurnState).not.toHaveBeenCalled();
+    expect(
+      mocks.create.mock.calls
+        .map(([row]) => String(row.content))
+        .filter((content) => content.includes('nimbalyst_tool_result') && content.includes('farbe')),
+    ).toEqual([]);
+  });
 });
 
 // The MCP AskUserQuestion tool serves every provider and sets the "awaiting

@@ -1341,12 +1341,16 @@ export async function handleRequestUserInput(
 
       if (sessionId) {
         // Restore the running indicator; CLI sessions defer to the PID watcher
-        // (NIM-806 Defect A).
-        void applyInteractivePromptSettleTurnState({
-          sessionId,
-          isCliSession,
-          stateManager: getSessionStateManager(),
-        }).catch(() => {});
+        // (NIM-806 Defect A). Only an answer resumes the turn: an abandoned call
+        // usually outlived its turn, and forcing `running` would show the session
+        // as busy in the database, on mobile and in the tray (as AskUserQuestion).
+        if (reason === 'user-responded') {
+          void applyInteractivePromptSettleTurnState({
+            sessionId,
+            isCliSession,
+            stateManager: getSessionStateManager(),
+          }).catch(() => {});
+        }
         // Persist resolved state + push to mobile (this also notifies the tray).
         void setSessionPendingPrompt(sessionId, false);
         // Notify renderer to clear the pending indicator and remove from atom.
