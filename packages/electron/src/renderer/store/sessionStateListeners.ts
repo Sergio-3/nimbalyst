@@ -41,8 +41,10 @@ import {
   sessionDraftInputAtom,
   sessionLastSubmitAtAtom,
   sessionDraftLocalModifiedAtAtom,
+  markSessionReadAtom,
   type PendingPrompt,
 } from './atoms/sessions';
+import { windowFocusedAtom } from './atoms/windowFocus';
 import { workstreamActiveChildAtom, workstreamStateAtom } from './atoms/workstreamState';
 import { triggerWorktreeRefreshAtom } from './atoms/gitOperations';
 import { activeWorkspacePathAtom, multiProjectModeAtom, openProjectsAtom } from './atoms/openProjects';
@@ -52,6 +54,7 @@ import {
   markSessionUnreadAtom,
   clearSessionUnreadAtom,
   markSessionTurnActivityAtom,
+  globalSessionActivityAtom,
 } from './atoms/sessionActivity';
 import type { TranscriptEvent } from '@nimbalyst/runtime/ai/server/transcript/types';
 import { TranscriptStreamAccumulator } from './transcriptStreamAccumulator';
@@ -183,6 +186,16 @@ function ensureMultiProjectSubscribers(): void {
   multiProjectSubscribersInstalled = true;
   store.sub(multiProjectModeAtom, reconcileSessionStateSubscription);
   store.sub(openProjectsAtom, reconcileSessionStateSubscription);
+}
+
+/**
+ * The session the user is looking at in `workspacePath`: the selected
+ * workstream's active child, or the selected session itself.
+ */
+function getCurrentlyViewedSessionId(workspacePath: string): string | null {
+  const selectedWorkstream = store.get(selectedWorkstreamAtom(workspacePath));
+  if (!selectedWorkstream) return null;
+  return store.get(workstreamActiveChildAtom(selectedWorkstream.id)) || selectedWorkstream.id;
 }
 
 /**
@@ -615,20 +628,15 @@ export function initSessionStateListeners(): () => void {
     }
 
     // Mark as unread if this is an output message (agent response) and the session
-    // is not currently being viewed
+    // is not currently being viewed. A selected session only counts as viewed
+    // while this window is focused -- otherwise a session left selected in a
+    // background window never reports that it finished, and the read-sync below
+    // would also clear the tray hint main set on completion.
     if (direction === 'output') {
-      const selectedWorkstream = store.get(selectedWorkstreamAtom(workspacePath));
+      const currentlyViewedSessionId = store.get(windowFocusedAtom)
+        ? getCurrentlyViewedSessionId(workspacePath)
+        : null;
 
-      // Determine the currently viewed session ID
-      // For a single session, it's the workstream ID itself
-      // For a workstream/worktree, it's the active child within it
-      let currentlyViewedSessionId: string | null = null;
-      if (selectedWorkstream) {
-        const activeChild = store.get(workstreamActiveChildAtom(selectedWorkstream.id));
-        currentlyViewedSessionId = activeChild || selectedWorkstream.id;
-      }
-
-      // If this message is for a session that's not currently viewed, mark it as unread
       if (sessionId !== currentlyViewedSessionId) {
         store.set(sessionUnreadAtom(sessionId), true);
         store.set(markSessionUnreadAtom, { sessionId, workspacePath });
@@ -1115,6 +1123,20 @@ export function initSessionStateListeners(): () => void {
   let cleanupTranscriptEvent: (() => void) | undefined;
   let cleanupTranscriptSessionReparsed: (() => void) | undefined;
   let cleanupMessagesLoggedBatch: (() => void) | undefined;
+
+  // When this window regains focus, the selected session that went unread
+  // while it was in the background is now being read.
+  const cleanupWindowFocusRead = store.sub(windowFocusedAtom, () => {
+    if (!store.get(windowFocusedAtom)) return;
+    for (const [workspacePath, activity] of store.get(globalSessionActivityAtom)) {
+      const viewedId = getCurrentlyViewedSessionId(workspacePath);
+      if (viewedId && activity.unread.has(viewedId)) {
+        store.set(clearSessionUnreadAtom, { sessionId: viewedId, workspacePath });
+        store.set(markSessionReadAtom, viewedId);
+      }
+    }
+  });
+
   if (window.electronAPI?.on) {
     cleanupTranscriptEvent = window.electronAPI.on('transcript:event', handleTranscriptEvent);
     cleanupTranscriptSessionReparsed = window.electronAPI.on('transcript:session-reparsed', handleTranscriptSessionReparsed);
@@ -1199,6 +1221,7 @@ export function initSessionStateListeners(): () => void {
     cleanupPendingNotificationNavigation?.();
     cleanupSyncReadState?.();
     cleanupSyncDraftInput?.();
+    cleanupWindowFocusRead();
     cleanupTranscriptEvent?.();
     cleanupTranscriptSessionReparsed?.();
     transcriptAccumulator.clear();
