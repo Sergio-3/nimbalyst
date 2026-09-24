@@ -70,6 +70,32 @@ describe('shouldSettleFromSessionFallback', () => {
     });
     expect(result).toBe(true);
   });
+  it('rejects an answer for a different Claude tool-use id even when it is the sole pending prompt', () => {
+    // A leaked waiter for an earlier form must not take the answer of the next one.
+    const result = shouldSettleFromSessionFallback({
+      waiterPromptId: 'toolu_A',
+      promptIdAliasSet: new Set(['toolu_A']),
+      responsePromptIds: ['toolu_B'],
+      pendingWaiterCountForSession: 1,
+    });
+    expect(result).toBe(false);
+  });
+
+  it('keeps accepting the sole pending prompt when the ids are not two distinct Claude tool-use ids', () => {
+    for (const [waiterPromptId, responsePromptIds] of [
+      ['call_A', ['call_B']],
+      ['toolu_A', ['rui-s1-123']],
+      ['toolu_A', ['nimtc|call_B|1|1']],
+      ['toolu_A', []],
+    ] as const) {
+      expect(shouldSettleFromSessionFallback({
+        waiterPromptId,
+        promptIdAliasSet: new Set([waiterPromptId]),
+        responsePromptIds,
+        pendingWaiterCountForSession: 1,
+      })).toBe(true);
+    }
+  });
 });
 
 describe('pending interactive waiter registry', () => {

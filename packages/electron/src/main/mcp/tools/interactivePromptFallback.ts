@@ -36,10 +36,25 @@ export function countPendingInteractiveWaiters(sessionKey: string): number {
 }
 
 /**
+ * True when the waiter and the response each carry a real Claude tool-use id
+ * (`toolu_`) and they differ. Claude ids always line up, so such a response
+ * belongs to another prompt — typically a waiter that outlived its form taking
+ * the answer of the next one. Codex, synthetic and missing ids are not judged.
+ */
+export function isAnswerForAnotherToolUse(
+  waiterPromptId: string,
+  responsePromptIds: readonly string[],
+): boolean {
+  return waiterPromptId.startsWith('toolu_')
+    && responsePromptIds.some((id) => id.startsWith('toolu_') && id !== waiterPromptId);
+}
+
+/**
  * Decide whether a session-scoped fallback response should settle the waiter.
  *
  * - A synthetic (`rui-`) waiter never had a correlatable id, so accept as before.
  * - Accept when the response carries an id in the waiter's alias set.
+ * - Reject an answer addressed to a different Claude tool-use id.
  * - Otherwise accept only when this is the sole pending prompt for the session
  *   (the session-scoped fallback is unambiguous); reject when several prompts are
  *   pending to avoid cross-prompt misrouting.
@@ -63,6 +78,10 @@ export function shouldSettleFromSessionFallback(params: {
 
   if (responsePromptIds.some((id) => promptIdAliasSet.has(id))) {
     return true;
+  }
+
+  if (isAnswerForAnotherToolUse(waiterPromptId, responsePromptIds)) {
+    return false;
   }
 
   return pendingWaiterCountForSession <= 1;
