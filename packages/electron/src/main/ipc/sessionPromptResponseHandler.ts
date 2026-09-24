@@ -336,20 +336,27 @@ export function registerSessionPromptResponseHandler(): void {
             ipcMain.emit(responseChannel, null, response);
           } else {
             // The MCP server's ipcMain.once() listener is gone — the Claude Code
-            // subprocess likely died or the app restarted since the proposal was
-            // created.  The response was already persisted to DB above, so it's
-            // durable. Mark the session as idle so it doesn't appear stuck forever.
-            console.warn(
-              `[SessionHandlers] No MCP waiter for git commit proposal response on channel: ${responseChannel}. ` +
-                `The Claude Code subprocess may have exited. Session: ${sessionId}, proposalId: ${canonicalPromptId}. ` +
-                `Marking session as idle.`
-            );
+            // subprocess likely died, the app restarted, or the call's connection
+            // dropped since the proposal was created.  The response was already
+            // persisted to DB above, so it's durable. Mark the session as idle so
+            // it doesn't appear stuck forever -- unless a later turn is running:
+            // ending it then would report the session idle mid-turn.
             try {
               const { getSessionStateManager } = await import(
                 "@nimbalyst/runtime/ai/server/SessionStateManager"
               );
               const stateManager = getSessionStateManager();
-              await stateManager.endSession(sessionId);
+              const state = stateManager.getSessionState(sessionId);
+              const turnRunning =
+                state?.status === "running" || state?.isStreaming === true;
+              console.warn(
+                `[SessionHandlers] No MCP waiter for git commit proposal response on channel: ${responseChannel}. ` +
+                  `The Claude Code subprocess may have exited. Session: ${sessionId}, proposalId: ${canonicalPromptId}. ` +
+                  (turnRunning ? `Leaving the running session alone.` : `Marking session as idle.`)
+              );
+              if (!turnRunning) {
+                await stateManager.endSession(sessionId);
+              }
             } catch (cleanupErr) {
               console.warn(
                 "[SessionHandlers] Failed to mark orphaned session as idle:",
