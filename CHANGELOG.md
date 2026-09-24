@@ -13,11 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 <!-- Changes to existing functionality go here -->
-<<<<<<< HEAD
-=======
 - Claude sessions gain MCP and resume reliability fixes while honoring enterprise tool restrictions.
 - iOS computer switching opens from the top-right computer status button.
->>>>>>> 11e6a141e (fix: upgrade Claude SDK for MCP and resume reliability)
 - Claude approval prompts default to Deny and offer only one-time approval when required.
 
 ### Fixed
