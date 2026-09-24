@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An AskUserQuestion or PromptForUserInput form no longer stays stuck on a request the agent had already dropped.
 - The installed app no longer opens a local debugging port that let any program on the machine control it.
 - An answer to a PromptForUserInput form no longer lands in a different form of the same session, and one given while the form is still starting is no longer lost.
+- A PromptForUserInput form whose answer is not accepted stays open and says why instead of showing "Submitted".
 
 ### Removed
 <!-- Removed features go here -->
