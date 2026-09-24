@@ -17,6 +17,7 @@ import { windows } from "../window/windowState";
 import { workspaceToWindowMap } from "./mcpWorkspaceResolver";
 import { requireMcpAuth } from "./mcpAuth";
 import { getAllowedClipOrigin, hasAllowedClipContentType } from "./clipRequestGuards";
+import { connectSseTransport } from "./sseTransportConnection";
 import { withTrackerSchemaWorkspace } from "../services/tracker/trackerSchemaScope";
 
 // Extracted modules
@@ -968,35 +969,25 @@ async function tryCreateServer(port: number): Promise<any> {
             serversByWorkspace.get(workspacePath)!.add(server);
           }
 
-          server
-            .connect(transport)
-            .then(() => {
-              transport.onclose = () => {
-                clearInterval(keepaliveInterval);
-                activeTransports.delete(transport.sessionId);
-                if (sessionId) {
-                  serverByNimbalystSession.delete(sessionId);
-                }
-                if (workspacePath) {
-                  serversByWorkspace.get(workspacePath)?.delete(server);
-                }
-              };
-            })
-            .catch((error) => {
-              console.error("[MCP Server] Connection error:", error);
-              clearInterval(keepaliveInterval);
-              activeTransports.delete(transport.sessionId);
-              if (sessionId) {
-                serverByNimbalystSession.delete(sessionId);
-              }
-              if (workspacePath) {
-                serversByWorkspace.get(workspacePath)?.delete(server);
-              }
-              if (!res.headersSent) {
-                res.writeHead(500);
-                res.end();
-              }
-            });
+          const onSseTransportClosed = () => {
+            clearInterval(keepaliveInterval);
+            activeTransports.delete(transport.sessionId);
+            if (sessionId) {
+              serverByNimbalystSession.delete(sessionId);
+            }
+            if (workspacePath) {
+              serversByWorkspace.get(workspacePath)?.delete(server);
+            }
+          };
+
+          connectSseTransport(server, transport, onSseTransportClosed).catch((error) => {
+            console.error("[MCP Server] Connection error:", error);
+            onSseTransportClosed();
+            if (!res.headersSent) {
+              res.writeHead(500);
+              res.end();
+            }
+          });
         } else if (isMcpEndpoint(pathname) && req.method === "POST") {
           // Legacy SSE POST flow: route to existing SSE transport if found
           const legacyTransportSessionId = parsedUrl.query.sessionId as
