@@ -136,6 +136,7 @@ import { diffPeekSizeAtom, setDiffPeekSizeAtom } from '../../store/atoms/diffPee
 import { registerSessionWorkspace, loadInitialSessionFileState } from '../../store/listeners/fileStateListeners';
 import { sessionFileEditsAtom } from '../../store/atoms/sessionFiles';
 import { SESSION_PHASE_COLUMNS, setSessionPhaseAtom, type SessionPhase } from '../../store/atoms/sessionKanban';
+import { createRequestUserInputHostActions } from './promptResponseOutcome';
 
 /**
  * Detect a metadata value that's the artifact of `{...stringValue, ...}` -
@@ -1811,36 +1812,12 @@ const LocalSessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscrip
       },
 
       // RequestUserInput operations - durable prompt path
-      requestUserInputSubmit: async (promptId: string, answers) => {
-        await window.electronAPI.invoke('messages:respond-to-prompt', {
-          sessionId,
-          promptId,
-          promptType: 'request_user_input_request' as const,
-          response: { answers, cancelled: false },
-          respondedBy: 'desktop' as const,
-        });
-        // Counts of each field type, no PII.
-        const fieldTypeCounts: Record<string, number> = {};
-        for (const a of Object.values(answers)) {
-          fieldTypeCounts[a.type] = (fieldTypeCounts[a.type] ?? 0) + 1;
-        }
-        posthog?.capture('request_user_input_answered', {
-          numFields: Object.keys(answers).length,
-          fieldTypeCounts,
-        });
-        refreshPendingPrompts(sessionId);
-      },
-      requestUserInputCancel: async (promptId: string) => {
-        await window.electronAPI.invoke('messages:respond-to-prompt', {
-          sessionId,
-          promptId,
-          promptType: 'request_user_input_request' as const,
-          response: { answers: {}, cancelled: true },
-          respondedBy: 'desktop' as const,
-        });
-        posthog?.capture('request_user_input_cancelled');
-        refreshPendingPrompts(sessionId);
-      },
+      ...createRequestUserInputHostActions({
+        sessionId,
+        invoke: (channel, payload) => window.electronAPI.invoke(channel, payload),
+        capture: (event, properties) => { posthog?.capture(event, properties); },
+        refreshPendingPrompts,
+      }),
 
       // ExitPlanMode operations
       exitPlanModeApprove: async (requestId: string) => {
