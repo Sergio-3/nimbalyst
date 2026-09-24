@@ -59,6 +59,29 @@ describe("interactive response polling", () => {
     expect(response?.answers).toEqual({ choice: "latest" });
   });
 
+  it("does not hand a sole waiter the answer for a different Claude tool-use id", () => {
+    const rows = [{
+      createdAt: new Date(3_000),
+      content: JSON.stringify({
+        type: "request_user_input_response",
+        promptId: "toolu_B",
+        answers: { choice: "for the next form" },
+      }),
+    }];
+    const options = {
+      expectedType: "request_user_input_response",
+      idFields: ["promptId", "rawPromptId"],
+      acceptedIds: new Set(["toolu_A"]),
+      notBefore: 2_000,
+      matchAnyId: true,
+    };
+
+    expect(findFreshInteractiveResponse(rows, { ...options, waiterPromptId: "toolu_A" })).toBeNull();
+    // Codex ids still match any row for a sole waiter.
+    expect(findFreshInteractiveResponse(rows, { ...options, waiterPromptId: "call_A" })?.answers)
+      .toEqual({ choice: "for the next form" });
+  });
+
   it("ignores rows without a trustworthy creation time", () => {
     const response = findFreshInteractiveResponse([
       {
