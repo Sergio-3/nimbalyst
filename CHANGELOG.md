@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The installed app no longer opens a local debugging port that let any program on the machine control it.
 - An answer to a PromptForUserInput form no longer lands in a different form of the same session, and one given while the form is still starting is no longer lost.
 - A PromptForUserInput form whose answer is not accepted stays open and says why instead of showing "Submitted".
+- A PromptForUserInput form that was cancelled after its request dropped no longer reopens on reload.
 
 ### Removed
 <!-- Removed features go here -->

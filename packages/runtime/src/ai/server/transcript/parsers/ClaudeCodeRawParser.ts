@@ -366,6 +366,8 @@ export class ClaudeCodeRawParser implements IRawMessageParser {
       } else if (parsed.type === 'git_commit_proposal_response' && parsed.proposalId) {
         const responseDescriptors = await this.parseGitCommitProposalResponse(parsed, context);
         descriptors.push(...responseDescriptors);
+      } else if (parsed.type === 'request_user_input_response' && parsed.cancelled === true && parsed.promptId) {
+        descriptors.push(...await this.parseCancelledRequestUserInputResponse(parsed, context));
       } else if (parsed.type === 'nimbalyst_tool_result') {
         const results = await this.parseToolResult({
           tool_use_id: parsed.tool_use_id || parsed.id,
@@ -677,6 +679,36 @@ export class ClaudeCodeRawParser implements IRawMessageParser {
       status: isCommitted ? 'completed' : 'error',
       result: JSON.stringify(resultPayload),
       isError: !isCommitted,
+    }];
+  }
+
+  // A stored cancel of a PromptForUserInput form whose MCP call had already
+  // died never reaches a waiter, so no tool_result follows it and the form
+  // would come back open on every reload. Close it as cancelled -- but only
+  // while the call has no result: a cancel from a second device after an
+  // answer must not overwrite that answer. A stored answer without `cancelled`
+  // is not a result; the form stays open until a tool_result exists.
+  private async parseCancelledRequestUserInputResponse(
+    parsed: any,
+    context: ParseContext,
+  ): Promise<CanonicalEventDescriptor[]> {
+    const promptId: string = parsed.promptId;
+    const existing = await context.findByProviderToolCallId(promptId);
+    const existingResult = (existing?.payload as any)?.result;
+    if (existingResult !== undefined && existingResult !== null && existingResult !== '') {
+      return [];
+    }
+    return [{
+      type: 'tool_call_completed',
+      providerToolCallId: promptId,
+      status: 'error',
+      result: JSON.stringify({
+        cancelled: true,
+        answers: {},
+        respondedBy: parsed.respondedBy,
+        respondedAt: parsed.respondedAt,
+      }),
+      isError: true,
     }];
   }
 
