@@ -255,6 +255,8 @@ describe('OpenAICodexProvider', () => {
   it('leads the Codex roster with GPT-6 Astra and keeps it out of the ACP roster', async () => {
     const expectedCodexModelIds = [
       'gpt-6-astra',
+      'gpt-6-sol',
+      'gpt-6-luna',
       'gpt-5.6-sol',
       'gpt-5.6-terra',
       'gpt-5.6-luna',
@@ -263,9 +265,9 @@ describe('OpenAICodexProvider', () => {
       'gpt-5.4-mini',
     ];
     // The ACP transport is deprecated for OpenAI and runs a separate, much
-    // older codex build with no gpt-6-astra catalog entry, so offering Astra
+    // older codex build with no GPT-6 catalog entries, so offering them
     // there would hand users a model that build cannot start.
-    const expectedAcpModelIds = expectedCodexModelIds.filter((id) => id !== 'gpt-6-astra');
+    const expectedAcpModelIds = expectedCodexModelIds.filter((id) => !id.startsWith('gpt-6-'));
     const codexModels = await OpenAICodexProvider.getModels(undefined, {
       loadSdkModule: async () => {
         throw new Error('sdk unavailable');
@@ -354,7 +356,7 @@ describe('OpenAICodexProvider', () => {
         provider: 'openai-codex',
       }),
     ]));
-    expect(models).toHaveLength(7);
+    expect(models).toHaveLength(9);
   });
 
   it('preserves CLI auth when initialized without an API key', async () => {

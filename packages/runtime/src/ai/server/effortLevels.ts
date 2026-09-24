@@ -37,6 +37,8 @@ const EFFORT_RANK: Record<EffortLevel, number> = {
  */
 const CODEX_EFFORT_CEILINGS: Readonly<Record<string, EffortLevel>> = {
   'gpt-6-astra': 'ultra',
+  'gpt-6-sol': 'ultra',
+  'gpt-6-luna': 'max',
   'gpt-5.6-sol': 'ultra',
   'gpt-5.6-terra': 'ultra',
   'gpt-5.6-luna': 'max',

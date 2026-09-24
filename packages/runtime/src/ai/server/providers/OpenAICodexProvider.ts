@@ -124,6 +124,9 @@ export class OpenAICodexProvider extends BaseAgentProvider {
     // marks it `"supported_in_api": true`, so it only appears when we name it
     // explicitly. Its catalog entry requires codex >= 0.153.0.
     { id: 'gpt-6-astra', name: 'GPT-6 Astra', contextWindow: 372000, maxTokens: 128000 },
+    // GPT-6 Sol and Luna enter the codex catalog in 0.156.1 (minimal client 0.155.0).
+    { id: 'gpt-6-sol', name: 'GPT-6 Sol', contextWindow: 272000, maxTokens: 128000 },
+    { id: 'gpt-6-luna', name: 'GPT-6 Luna', contextWindow: 272000, maxTokens: 128000 },
     { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', contextWindow: 372000, maxTokens: 128000 },
     { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', contextWindow: 372000, maxTokens: 128000 },
     { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', contextWindow: 372000, maxTokens: 128000 },
