@@ -26,11 +26,14 @@ import {
   sessionLastActivityAtom,
   sessionListWorkspaceAtom,
   selectedWorkstreamAtom,
+  sessionUnreadAtom,
   type SessionMeta,
 } from '../atoms/sessions';
 import {
+  globalSessionActivityAtom,
   globalSessionTurnActivityAtom,
 } from '../atoms/sessionActivity';
+import { windowFocusedAtom } from '../atoms/windowFocus';
 import { activeWorkspacePathAtom, openProjectsAtom } from '../atoms/openProjects';
 import { activeExtensionPanelAtom, activeExtensionBottomPanelAtom } from '../atoms/extensionPanels';
 import { resetWindowMode, windowModeAtom } from '../atoms/windowMode';
@@ -1068,5 +1071,81 @@ describe('closed project transcript retention', () => {
       store.set(setSessionWorkspaceOpenAtom, { workspacePath, isOpen: true });
       for (const id of ids) store.set(sessionStoreAtom(id), null);
     }
+  });
+});
+
+// A session left selected in a background window must still report that it
+// finished: "selected" only counts as "being read" while the window is focused.
+// Otherwise the debounced read-sync (hasUnread:false) also clears the tray /
+// menu-bar hint that main set on session:completed.
+describe('unread: selected session in an unfocused window', () => {
+  function selectSession(sessionId: string): void {
+    initWorkstreamState(WS);
+    store.set(selectedWorkstreamAtom(WS), { type: 'session', id: sessionId });
+  }
+
+  function readSyncCalls(sessionId: string): unknown[] {
+    const invoke = window.electronAPI.invoke as ReturnType<typeof vi.fn>;
+    return invoke.mock.calls.filter(
+      ([channel, id, payload]) =>
+        channel === 'ai:updateSessionMetadata' && id === sessionId && payload?.metadata?.hasUnread === false,
+    );
+  }
+
+  afterEach(() => {
+    store.set(windowFocusedAtom, false);
+    store.set(selectedWorkstreamAtom(WS), null);
+  });
+
+  it('marks the selected session unread and skips the read-sync while the window is unfocused', async () => {
+    vi.useFakeTimers();
+    try {
+      const sid = uniqueSessionId('bg-selected');
+      seedRegistry([{ id: sid }]);
+      selectSession(sid);
+      store.set(windowFocusedAtom, false);
+
+      handlers.get('ai:message-logged')!({ sessionId: sid, direction: 'output', workspacePath: WS });
+      await vi.advanceTimersByTimeAsync(6_000);
+
+      expect(store.get(sessionUnreadAtom(sid))).toBe(true);
+      expect(readSyncCalls(sid)).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the selected session read and syncs read state while the window is focused', async () => {
+    vi.useFakeTimers();
+    try {
+      const sid = uniqueSessionId('fg-selected');
+      seedRegistry([{ id: sid }]);
+      selectSession(sid);
+      store.set(windowFocusedAtom, true);
+
+      handlers.get('ai:message-logged')!({ sessionId: sid, direction: 'output', workspacePath: WS });
+      await vi.advanceTimersByTimeAsync(6_000);
+
+      expect(store.get(sessionUnreadAtom(sid))).toBe(false);
+      expect(readSyncCalls(sid)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('marks the selected session read when its window regains focus', () => {
+    const sid = uniqueSessionId('refocus-selected');
+    seedRegistry([{ id: sid }]);
+    selectSession(sid);
+    store.set(windowFocusedAtom, false);
+
+    handlers.get('ai:message-logged')!({ sessionId: sid, direction: 'output', workspacePath: WS });
+    expect(store.get(sessionUnreadAtom(sid))).toBe(true);
+
+    store.set(windowFocusedAtom, true);
+
+    expect(store.get(sessionUnreadAtom(sid))).toBe(false);
+    expect(store.get(globalSessionActivityAtom).get(WS)?.unread.has(sid) ?? false).toBe(false);
+    expect(readSyncCalls(sid)).toHaveLength(1);
   });
 });
