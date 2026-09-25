@@ -11,7 +11,11 @@ import {
   hasTerminalizedAskUserQuestion,
   persistAskUserQuestionTerminalResult,
 } from "../askUserQuestionFallbackResolution";
-import { deliverCodexQuestionAnswer } from "../codexQuestionDelivery";
+import {
+  codexQuestionRecoveryId,
+  deliverCodexQuestionAnswer,
+} from "../codexQuestionDelivery";
+import { enqueueWithReceipt } from "../requestUserInputResumption";
 import type { AIServiceContext } from "./AIServiceContext";
 
 export function registerAskUserQuestionAnswerHandler(
@@ -173,7 +177,7 @@ export function registerAskUserQuestionAnswerHandler(
       // while session was waiting for input). Auto-resume the session by sending
       // a new message that includes the user's answer. The Claude Code SDK will
       // resume using the stored providerSessionId, picking up conversation history.
-      if (resolvedSessionId && ctx.sendMessageHandler && session) {
+      if (resolvedSessionId && session) {
         // Issue #773: without a terminal tool_result the widget stayed pending, so
         // every re-click auto-resumed again. Refuse a repeat answer for a question
         // this process already terminalized.
@@ -219,23 +223,27 @@ export function registerAskUserQuestionAnswerHandler(
           `[AIService] No live handler for AskUserQuestion, auto-resuming session: ${resolvedSessionId}`
         );
 
-        // Fire-and-forget: resume the session in the background
-        const workspacePath = session.workspacePath;
-        setImmediate(async () => {
-          try {
-            await ctx.sendMessageHandler!(
-              event,
-              resumeMessage,
-              undefined,
-              resolvedSessionId,
-              workspacePath
-            );
-          } catch (err) {
-            logger.main.error(
-              `[AIService] Failed to auto-resume session after AskUserQuestion: ${err}`
-            );
+        // Resume through the queue: a direct send would abort a running turn.
+        // The question's receipt keeps a repeated answer from queueing twice.
+        try {
+          if (!session.workspacePath) {
+            throw new Error("the session has no workspace");
           }
-        });
+          const queued = await enqueueWithReceipt({
+            id: codexQuestionRecoveryId(resolvedSessionId, questionId),
+            sessionId: resolvedSessionId,
+            workspacePath: session.workspacePath,
+            prompt: resumeMessage,
+            documentContext: { promptOrigin: "interactive-question" },
+          });
+          if (queued.created && queued.outcome.kind === "failed") {
+            throw new Error(queued.outcome.reason);
+          }
+        } catch (err) {
+          logger.main.error(
+            `[AIService] Failed to auto-resume session after AskUserQuestion: ${err}`
+          );
+        }
 
         return { success: true };
       }

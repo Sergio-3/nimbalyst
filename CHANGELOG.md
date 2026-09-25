@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A PromptForUserInput form whose answer is not accepted stays open and says why instead of showing "Submitted".
 - A PromptForUserInput form that was cancelled after its request dropped no longer reopens on reload.
 - Answering a PromptForUserInput form after its request dropped now resumes the session with that answer, once.
+- A late AskUserQuestion answer now waits for the running turn instead of interrupting it.
 
 ### Removed
 <!-- Removed features go here -->
