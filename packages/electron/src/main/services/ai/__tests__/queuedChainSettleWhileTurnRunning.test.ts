@@ -70,11 +70,12 @@ const queuedPrompt = {
 };
 
 let pending: Array<typeof queuedPrompt> = [];
+let claimable: { id: string; prompt: string; attachments: null; documentContext: unknown } = queuedPrompt;
 
 vi.mock('../../RepositoryManager', () => ({
   getQueuedPromptsStore: () => ({
     listPending: async () => pending,
-    claim: async (id: string) => (id === queuedPrompt.id ? queuedPrompt : null),
+    claim: async (id: string) => (id === claimable.id ? claimable : null),
     complete: async () => {},
     fail: async () => {},
   }),
@@ -90,6 +91,7 @@ vi.mock('@nimbalyst/runtime/storage/repositories/AISessionsRepository', () => ({
 describe('queued chain settling while a turn is running', () => {
   beforeEach(() => {
     pending = [queuedPrompt];
+    claimable = queuedPrompt;
   });
 
   it('keeps the session tracked when the chain settles under a live turn', async () => {
@@ -213,5 +215,74 @@ describe('queued chain settling while a turn is running', () => {
 
     expect(trackedBeforeSettle).toBe(true);
     expect(stateManager.getRunningSessionIds()).not.toContain(SESSION_ID);
+  });
+
+  it('closes an answered form once its resume turn was delivered', async () => {
+    // The fallback behind the resume turn's own observer: after the turn
+    // returns, the delivery hook writes the form's result from the queue row.
+    const { AIService } = await import('../AIService');
+    const { SessionProcessingGuard } = await import('../queuedPromptDispatcher');
+    const { buildResumeMessage } = await import('../requestUserInputResumption');
+    const { AgentMessagesRepository } = await import(
+      '@nimbalyst/runtime/storage/repositories/AgentMessagesRepository'
+    );
+    const { SessionStateManager, setSessionStateManager } = await import(
+      '@nimbalyst/runtime/ai/server/SessionStateManager'
+    );
+    const { ProviderFactory } = await import('@nimbalyst/runtime/ai/server/ProviderFactory');
+
+    setSessionStateManager(new SessionStateManager());
+    (ProviderFactory as unknown as { providers: Map<string, unknown> }).providers.set(
+      `claude-code-${SESSION_ID}`,
+      { isLeadBusy: () => false },
+    );
+
+    const answers = { farbe: { type: 'singleSelect', selectedId: 'rot' } };
+    claimable = {
+      id: 'prompt-answer-1',
+      prompt: buildResumeMessage({ toolUseId: 'toolu_X', answers, respondedAt: 1, late: false }),
+      attachments: null,
+      documentContext: { answeredPrompt: { toolUseId: 'toolu_X', answers, respondedBy: 'desktop' } },
+    };
+    pending = [claimable as typeof queuedPrompt];
+    const rows: Array<{ sessionId: string; direction: string; content: string }> = [];
+    const create = vi.fn(async (row: (typeof rows)[number]) => {
+      rows.push(row);
+    });
+    AgentMessagesRepository.setStore({
+      create,
+      list: async (sessionId: string) => rows.filter((row) => row.sessionId === sessionId),
+    } as never);
+
+    const svc = {
+      sessionsProcessingQueue: new SessionProcessingGuard(),
+      hooklessWatcher: { scheduleStop: vi.fn() },
+      sendMessageHandler: async (_event: unknown, prompt: string) => {
+        // The turn stores the queued text as its input row, as a real turn does.
+        rows.push({ sessionId: SESSION_ID, direction: 'input', content: JSON.stringify({ prompt }) });
+        pending = [];
+        return { content: 'ok' };
+      },
+      continueQueuedPromptChain: async () => {},
+      requestQueueDrive: vi.fn(),
+      publishQueueStateToSync: async () => {},
+    };
+
+    try {
+      await AIService.prototype.tryDispatchNextQueuedPrompt.call(
+        svc as never,
+        SESSION_ID,
+        WORKSPACE,
+        { isDestroyed: () => false, webContents: { send: vi.fn(), mainFrame: {} } } as never,
+        'test queue',
+      );
+
+      await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+      const result = JSON.parse(create.mock.calls[0][0].content);
+      expect(result).toMatchObject({ type: 'nimbalyst_tool_result', tool_use_id: 'toolu_X', is_error: false });
+      expect(JSON.parse(result.result).answers).toEqual(answers);
+    } finally {
+      AgentMessagesRepository.clearStore();
+    }
   });
 });

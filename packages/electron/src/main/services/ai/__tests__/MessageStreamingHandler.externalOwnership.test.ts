@@ -141,6 +141,9 @@ vi.mock("../../../HistoryManager", () => ({
 
 vi.mock("../../../file/WorkspaceEventBus", () => ({
   addGitignoreBypass: vi.fn(),
+  // requestUserInputResumption reaches codexShellTrackingHost through
+  // RepositoryManager, and that module reads this export at load.
+  drainWorkspaceEvents: vi.fn(),
 }));
 
 vi.mock("../../SyncManager", () => ({

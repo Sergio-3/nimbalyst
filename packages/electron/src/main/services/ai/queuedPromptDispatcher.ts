@@ -73,6 +73,8 @@ interface DispatchClaimedQueuedPromptOptions {
   logError: (message: string, error: unknown) => void;
   onAfterSettled?: () => Promise<void>;
   onChainSettled?: (payload: { sessionId: string; workspacePath: string; source: string }) => Promise<void>;
+  /** Runs once the turn for `claimed` returned, before its rows complete. A throw is only logged. */
+  onDelivered?: (claimed: ClaimedQueuedPrompt) => Promise<void>;
   onPromptClaimed: (payload: { sessionId: string; promptId: string }) => void;
   processingSet: SessionProcessingGuard;
   queueStore: QueuedPromptStoreLike;
@@ -100,6 +102,7 @@ export async function dispatchClaimedQueuedPrompt(
     logError,
     onAfterSettled,
     onChainSettled,
+    onDelivered,
     onPromptClaimed,
     processingSet,
     queueStore,
@@ -145,6 +148,13 @@ export async function dispatchClaimedQueuedPrompt(
       } as Electron.IpcMainInvokeEvent;
 
       await sendMessageHandler(mockEvent, claimed.prompt, docContext, sessionId, workspacePath);
+      if (onDelivered) {
+        try {
+          await onDelivered(claimed);
+        } catch (hookError) {
+          logError(`[AIService] ${source}: delivered hook failed for queued prompt ${claimed.id}:`, hookError);
+        }
+      }
       for (const promptId of settleIds) {
         await queueStore.complete(promptId);
       }
@@ -200,6 +210,7 @@ interface TryClaimAndDispatchNextQueuedPromptOptions {
   logInfo: (message: string) => void;
   onAfterSettled?: DispatchClaimedQueuedPromptOptions['onAfterSettled'];
   onChainSettled?: DispatchClaimedQueuedPromptOptions['onChainSettled'];
+  onDelivered?: DispatchClaimedQueuedPromptOptions['onDelivered'];
   onPromptClaimed: DispatchClaimedQueuedPromptOptions['onPromptClaimed'];
   processingSet: SessionProcessingGuard;
   queueStore: QueuedPromptStoreLike;
@@ -221,6 +232,7 @@ export async function tryClaimAndDispatchNextQueuedPrompt(
     logInfo,
     onAfterSettled,
     onChainSettled,
+    onDelivered,
     onPromptClaimed,
     processingSet,
     queueStore,
@@ -298,6 +310,7 @@ export async function tryClaimAndDispatchNextQueuedPrompt(
     logError,
     onAfterSettled,
     onChainSettled,
+    onDelivered,
     onPromptClaimed,
     processingSet,
     queueStore,

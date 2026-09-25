@@ -79,6 +79,15 @@ export interface DocumentContext {
 
   /** Durable reciprocal links for work dispatched from a team conversation. */
   agentWakeOrigin?: AgentWakePromptOrigin;
+
+  /** A late PromptForUserInput answer this turn resumes the session with. */
+  answeredPrompt?: AnsweredPromptContext;
+}
+
+export interface AnsweredPromptContext {
+  toolUseId: string;
+  answers: Record<string, unknown>;
+  respondedBy?: 'desktop' | 'mobile';
 }
 
 export type PromptActor = 'human' | 'agent' | 'system';

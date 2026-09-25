@@ -37,7 +37,10 @@ import { SessionCommitService } from "../../services/SessionCommitService";
 import { resolveGitCommitProposalTarget } from "../../services/gitCommitProposalTarget";
 import { findFreshInteractiveResponse } from "./interactiveResponsePolling";
 import { isInteractivePromptClosed } from "../../services/ai/questionTerminalResultLookup";
-import { loadPromptAnswerFacts } from "../../services/ai/requestUserInputResumption";
+import {
+  loadPromptAnswerFacts,
+  notePromptAbandoned,
+} from "../../services/ai/requestUserInputResumption";
 import {
   clearPendingInteractiveWaiter,
   countPendingInteractiveWaiters,
@@ -1328,6 +1331,8 @@ export async function handleRequestUserInput(
       settled = true;
       detachCall?.();
       clearPendingInteractiveWaiter(sessionKey);
+      // Nobody waits for this call any more; a later answer resumes the session.
+      if (sessionId && reason === 'client-abandoned') notePromptAbandoned(sessionId, promptId);
       // See handleAskUserQuestion: an abandoned call takes the waiter down but
       // leaves the form standing, because the user has decided nothing.
       const terminalize = shouldTerminalizePrompt({

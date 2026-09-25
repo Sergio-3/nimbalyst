@@ -71,6 +71,18 @@ describe('PromptForUserInput rows -> parser -> widget', () => {
     } as unknown as InteractiveWidgetHost);
   });
 
+  // The row form the late-answer writer produces (its test compares against
+  // this fixture) closes the form as answered.
+  it('closes a form as answered by its written tool_result', async () => {
+    const state = await renderAfter([
+      promptToolUseRow(SESSION_ID, TOOL_USE_ID),
+      promptResponseRow(SESSION_ID, TOOL_USE_ID),
+      promptToolResultRow(SESSION_ID, TOOL_USE_ID),
+    ]);
+
+    expect(state).toBe('completed');
+  });
+
   it('closes a form as cancelled when the only stored answer is a cancel', async () => {
     const state = await renderAfter([
       promptToolUseRow(SESSION_ID, TOOL_USE_ID),

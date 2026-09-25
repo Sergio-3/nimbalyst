@@ -164,4 +164,15 @@ describe("loadPromptAnswerFacts", () => {
     expect(isToolUseFromEarlierProcess(await loadPromptAnswerFacts(SESSION, "toolu_NOW"), processStart)).toBe(false);
     expect(isToolUseFromEarlierProcess(await loadPromptAnswerFacts(SESSION, "toolu_OLD"), processStart)).toBe(true);
   });
+
+  it("tells a sub-agent's or teammate's form from a lead form", async () => {
+    await row(SESSION, "output", toolUse("toolu_LEAD"));
+    await row(SESSION, "output", { ...toolUse("toolu_SUB"), parent_tool_use_id: "toolu_AGENT" });
+    // A teammate's query outlives the lead turn too, and logs into the lead session without a parent.
+    await row(SESSION, "output", { ...toolUse("toolu_MATE"), parent_tool_use_id: null, _isTeammateOutput: true });
+
+    expect((await loadPromptAnswerFacts(SESSION, "toolu_LEAD")).toolUseInSubagent).toBeFalsy();
+    expect(await loadPromptAnswerFacts(SESSION, "toolu_SUB")).toMatchObject({ hasToolUse: true, toolUseInSubagent: true });
+    expect(await loadPromptAnswerFacts(SESSION, "toolu_MATE")).toMatchObject({ hasToolUse: true, toolUseInSubagent: true });
+  });
 });
