@@ -8,6 +8,7 @@
 import { toMillis } from '../utils/timestampUtils';
 import type {
   AgentWakePromptOrigin,
+  AnsweredPromptContext,
   PromptProvenance,
 } from '@nimbalyst/runtime/ai/server/types';
 
@@ -25,6 +26,7 @@ export interface QueuedPrompt {
     promptOrigin?: string;
     promptProvenance?: PromptProvenance;
     agentWakeOrigin?: AgentWakePromptOrigin;
+    answeredPrompt?: AnsweredPromptContext;
   };
   createdAt: number;  // epoch ms
   claimedAt?: number; // epoch ms
@@ -45,6 +47,7 @@ export interface CreateQueuedPromptInput {
     promptOrigin?: string;
     promptProvenance?: PromptProvenance;
     agentWakeOrigin?: AgentWakePromptOrigin;
+    answeredPrompt?: AnsweredPromptContext;
   };
 }
 

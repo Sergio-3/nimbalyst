@@ -198,10 +198,17 @@ vi.mock("../../tutorial/tutorialAnalytics", () => ({
   captureTutorialMilestone: vi.fn(),
 }));
 
+vi.mock("../requestUserInputResumption", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../requestUserInputResumption")>()),
+  notePromptTurnEnded: vi.fn(),
+}));
+
+import { AgentMessagesRepository } from "@nimbalyst/runtime/storage/repositories/AgentMessagesRepository";
 import { MessageStreamingHandler } from "../MessageStreamingHandler";
 import { logger } from '../../../utils/logger';
 import { resolveClaudeCodeParentContextWindow } from '@nimbalyst/runtime/ai/modelConstants';
 import { resetPushOutcomeWarnings } from '@nimbalyst/runtime/sync/pushOutcome';
+import { buildResumeMessage, notePromptTurnEnded } from "../requestUserInputResumption";
 
 /**
  * OpenCode replaces its whole config on every `initialize`, which is how the
@@ -250,6 +257,7 @@ async function runTurn(options: {
   session: Record<string, unknown>;
   provider: RecordingProvider;
   sessionManager?: Record<string, unknown>;
+  documentContext?: Record<string, unknown>;
 }) {
   mocks.providerFactory.createProvider.mockReturnValue(options.provider);
 
@@ -283,7 +291,7 @@ async function runTurn(options: {
   await new MessageStreamingHandler(service as never).handle(
     { sender: { id: 7, isDestroyed: vi.fn(() => false), send: vi.fn() } } as never,
     "Prompt",
-    undefined,
+    options.documentContext as never,
     options.session.id as string,
     options.session.workspacePath as string
   );
@@ -470,5 +478,80 @@ describe('stream publication warnings', () => {
     expect(mocks.pushChange).toHaveBeenCalledTimes(3);
     release();
     await running;
+  });
+});
+
+describe("MessageStreamingHandler turn end", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.providerFactory.getProvider.mockReturnValue(null);
+  });
+
+  it("records the end of every turn once its stream is over, also of one that fails", async () => {
+    // A form its turn left without a result gets no waiter anymore; the answer
+    // path reads this record to resume the session instead. Recorded while the
+    // stream still runs, it would declare the turn's own starting forms dead.
+    const notedDuringStream: boolean[] = [];
+    const noted = (sessionId: string) => vi.mocked(notePromptTurnEnded).mock.calls.some(([id]) => id === sessionId);
+
+    const ending = new RecordingProvider();
+    ending.sendMessage = async function* () {
+      notedDuringStream.push(noted("ended-session"));
+    };
+    await runTurn({ session: openCodeSession({ id: "ended-session" }), provider: ending });
+    expect(notePromptTurnEnded).toHaveBeenCalledWith("ended-session");
+
+    const failing = new RecordingProvider();
+    failing.sendMessage = async function* () {
+      notedDuringStream.push(noted("failed-session"));
+      throw new Error("provider died");
+    };
+    await runTurn({ session: openCodeSession({ id: "failed-session" }), provider: failing }).catch(() => {});
+    expect(notePromptTurnEnded).toHaveBeenCalledWith("failed-session");
+    expect(notedDuringStream).toEqual([false, false]);
+  });
+});
+
+describe("MessageStreamingHandler resume turn of an answered form", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.providerFactory.getProvider.mockReturnValue(null);
+  });
+
+  it("closes the form once the turn's input row is stored, hidden or not", async () => {
+    const answers = { farbe: { type: "singleSelect", selectedId: "rot" } };
+    const rows: Array<{ sessionId: string; direction: string; hidden?: boolean; content: string }> = [
+      {
+        sessionId: "resume-session",
+        direction: "input",
+        hidden: true,
+        content: JSON.stringify({ prompt: buildResumeMessage({ toolUseId: "toolu_X", answers, respondedAt: 1, late: false }) }),
+      },
+    ];
+    const create = vi.fn(async (row: (typeof rows)[number]) => {
+      rows.push(row);
+    });
+    AgentMessagesRepository.setStore({
+      create,
+      list: async (sessionId: string) => rows.filter((row) => row.sessionId === sessionId),
+    } as never);
+    try {
+      const provider = new RecordingProvider();
+      provider.sendMessage = async function* () {
+        provider.emit("message:logged", { sessionId: "resume-session", direction: "input", hidden: true });
+      };
+      await runTurn({
+        session: openCodeSession({ id: "resume-session" }),
+        provider,
+        documentContext: { answeredPrompt: { toolUseId: "toolu_X", answers, respondedBy: "desktop" } },
+      });
+
+      await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+      const result = JSON.parse(create.mock.calls[0][0].content);
+      expect(result).toMatchObject({ type: "nimbalyst_tool_result", tool_use_id: "toolu_X", is_error: false });
+      expect(JSON.parse(result.result).answers).toEqual(answers);
+    } finally {
+      AgentMessagesRepository.clearStore();
+    }
   });
 });

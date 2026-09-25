@@ -17,6 +17,9 @@ const { ipcMainStub, windowSends, mocks } = await vi.hoisted(async () => {
       create: hoistedVi.fn(async (row: any) => row),
       query: hoistedVi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [] })),
       list: hoistedVi.fn(async (_sessionId: string, _options?: unknown): Promise<any[]> => []),
+      queue: new Map<string, any>(),
+      queueCreate: hoistedVi.fn(async (row: any) => row),
+      drive: hoistedVi.fn(async (_sessionId: string, _workspacePath: string) => ({ kind: 'dispatched' as const })),
     },
   };
 });
@@ -78,18 +81,24 @@ vi.mock('../../tray/TrayManager', () => ({
   TrayManager: { getInstance: () => ({ onPromptResolved() {} }) },
 }));
 vi.mock('../../services/RepositoryManager', () => ({
-  getQueuedPromptsStore: () => ({}),
+  getQueuedPromptsStore: () => ({
+    get: async (id: string) => mocks.queue.get(id) ?? null,
+    create: async (row: any) => {
+      mocks.queue.set(row.id, { ...row, status: 'pending' });
+      return mocks.queueCreate(row);
+    },
+  }),
 }));
 vi.mock('../../services/ai/pendingPromptPersistence', () => ({
   setSessionPendingPrompt: async () => {},
 }));
 vi.mock('@nimbalyst/runtime/ai/server/SessionStateManager', () => ({
-  getSessionStateManager: () => ({ updateActivity: async () => {} }),
+  getSessionStateManager: () => ({ updateActivity: async () => {}, getSessionState: () => null }),
 }));
 // The handler reads the session's provider to special-case Codex. Without a
 // stub the real repository runs and throws for want of a store adapter.
 vi.mock('@nimbalyst/runtime/storage/repositories/AISessionsRepository', () => ({
-  AISessionsRepository: { get: async () => ({ provider: 'claude-code' }) },
+  AISessionsRepository: { get: async () => ({ provider: 'claude-code', workspacePath: '/workspace' }) },
 }));
 
 import {
@@ -108,6 +117,7 @@ import {
   handleRequestUserInput,
 } from '../tools/interactiveToolHandlers';
 import { registerSessionPromptResponseHandler } from '../../ipc/sessionPromptResponseHandler';
+import { configureRequestUserInputResumption } from '../../services/ai/requestUserInputResumption';
 import { openSseMcpConnection, type SseMcpConnection } from './sseMcpConnection';
 
 const ipc = new EventEmitter();
@@ -511,6 +521,38 @@ describe('PromptForUserInput after its MCP connection dropped', () => {
         .map(([row]) => String(row.content))
         .filter((content) => content.includes('nimbalyst_tool_result') && content.includes('farbe')),
     ).toEqual([]);
+  });
+
+  // The form was shown by this process, so only the dropped connection tells
+  // that nobody waits for it any more.
+  it('resumes the session with an answer given after the connection of a young call dropped', async () => {
+    configureRequestUserInputResumption({ drive: mocks.drive, publish: async () => {} });
+    mocks.queue.clear();
+    mocks.queueCreate.mockClear();
+    mocks.list.mockResolvedValue([
+      {
+        sessionId,
+        direction: 'output',
+        source: 'claude-code',
+        createdAt: new Date(),
+        content: JSON.stringify({
+          type: 'assistant',
+          message: { content: [{ type: 'tool_use', id: 'toolu_X', name: 'mcp__nimbalyst__PromptForUserInput', input: {} }] },
+        }),
+      },
+    ]);
+    try {
+      await openPromptAndDropConnection('toolu_X');
+      expect(await submitThroughHandler('toolu_X', { farbe: { type: 'singleSelect', selectedId: 'rot' } })).toMatchObject({ success: true });
+
+      expect(mocks.queueCreate).toHaveBeenCalledTimes(1);
+      expect(mocks.queueCreate.mock.calls[0][0].prompt).toContain('toolu_X');
+      expect(mocks.drive).toHaveBeenCalledWith(sessionId, '/workspace');
+    } finally {
+      configureRequestUserInputResumption(undefined as any);
+      mocks.list.mockReset();
+      mocks.list.mockResolvedValue([]);
+    }
   });
 });
 
