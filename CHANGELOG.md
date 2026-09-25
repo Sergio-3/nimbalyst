@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An answer to a PromptForUserInput form no longer lands in a different form of the same session, and one given while the form is still starting is no longer lost.
 - A PromptForUserInput form whose answer is not accepted stays open and says why instead of showing "Submitted".
 - A PromptForUserInput form that was cancelled after its request dropped no longer reopens on reload.
+- Answering a PromptForUserInput form after its request dropped now resumes the session with that answer, once.
 
 ### Removed
 <!-- Removed features go here -->

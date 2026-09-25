@@ -154,6 +154,7 @@ import {
 } from './aiServiceUtils';
 import { disableParentNotificationsAfterDirectTakeover } from './childSessionTakeover';
 import { installScopedProviderListener } from './providerListenerRegistry';
+import { notePromptTurnEnded, watchAnsweredPromptInput } from './requestUserInputResumption';
 import { shouldSettleUnterminatedTurn } from './sessionSettlePolicy';
 import { captureTutorialMilestone } from '../tutorial/tutorialAnalytics';
 import { trackSendBlocked } from '../analytics/sendWallAnalytics';
@@ -856,7 +857,11 @@ export class MessageStreamingHandler {
     // when the session is in a project that is not currently visible. The
     // renderer's session registry holds only the visible project's
     // sessions, so it can't always resolve the path on its own.
+    // A turn that resumes a late PromptForUserInput answer closes that form as
+    // soon as its input row is stored -- hidden or not.
+    const observeAnsweredPrompt = watchAnsweredPromptInput(session.id, documentContext, effectiveWorkspacePath);
     const onMessageLogged = (data: { sessionId: string; direction: string; hidden?: boolean }) => {
+      observeAnsweredPrompt(data);
       if (data.hidden) return;
       safeSend(event, 'ai:message-logged', { ...data, workspacePath: effectiveWorkspacePath });
     };
@@ -3182,6 +3187,9 @@ export class MessageStreamingHandler {
       // parked-generator case reaches neither exit and is covered by the
       // ticker's own expiry.
       stopTurnLiveness();
+      // A PromptForUserInput call this turn left without a result gets no
+      // waiter anymore; a late answer to it resumes the session instead.
+      notePromptTurnEnded(session.id);
       await Promise.all([questionRetirement, inboxRetirement]);
 
       // A cancelled turn or a provider that disconnected mid-command never sends

@@ -1,4 +1,6 @@
+import { ipcMain } from "electron";
 import { hasLiveInteractivePrompt } from "../mcp/tools/interactivePromptLiveness";
+import { getRequestUserInputResponseChannel } from "../mcp/tools/requestUserInputChannels";
 import { SessionCommitService } from "../services/SessionCommitService";
 import { TranscriptMigrationRepository } from "@nimbalyst/runtime/storage/repositories/TranscriptMigrationRepository";
 import { AISessionsRepository } from "@nimbalyst/runtime/storage/repositories/AISessionsRepository";
@@ -12,6 +14,7 @@ import {
 } from "../services/ai/gitCommitProposalPromptUtils";
 import { setSessionPendingPrompt } from "../services/ai/pendingPromptPersistence";
 import { deliverCodexQuestionAnswer } from "../services/ai/codexQuestionDelivery";
+import { answerPromptForUserInput } from "../services/ai/requestUserInputResumption";
 
 export function registerSessionPromptResponseHandler(): void {
   /**
@@ -136,18 +139,57 @@ export function registerSessionPromptResponseHandler(): void {
         }
 
         // Insert response message
-        await database.query(
-          `INSERT INTO ai_agent_messages (session_id, source, direction, content, created_at, hidden)
+        const insertResponseRow = (content: unknown) =>
+          database.query(
+            `INSERT INTO ai_agent_messages (session_id, source, direction, content, created_at, hidden)
                  VALUES ($1, $2, $3, $4, $5, $6)`,
-          [
+            [
+              sessionId,
+              "nimbalyst",
+              "output",
+              JSON.stringify(content),
+              new Date(timestamp),
+              false,
+            ]
+          );
+
+        // A PromptForUserInput answer whose call is gone resumes the session
+        // through the queue instead of being stored for a waiter that no longer
+        // exists (see requestUserInputResumption).
+        if (promptType === "request_user_input_request") {
+          const waiterPromptIds = requestUserInputTargets?.waiterPromptIds ?? [
+            canonicalPromptId,
+          ];
+          const late = await answerPromptForUserInput({
             sessionId,
-            "nimbalyst",
-            "output",
-            JSON.stringify(responseContent),
-            new Date(timestamp),
-            false,
-          ]
-        );
+            toolUseId: canonicalPromptId,
+            answers: response.answers || {},
+            cancelled: response.cancelled === true,
+            respondedBy,
+            respondedAt: timestamp,
+            hasLiveWaiter: waiterPromptIds.some(
+              (id) =>
+                ipcMain.listenerCount(
+                  getRequestUserInputResponseChannel(sessionId, id)
+                ) > 0
+            ),
+            writeResponseRow: (fields) =>
+              insertResponseRow({ ...responseContent, ...fields }),
+          });
+          if (late) {
+            if (late.success) {
+              event.sender.send("ai:requestUserInputResolved", {
+                sessionId,
+                promptId: canonicalPromptId,
+              });
+              TrayManager.getInstance().onPromptResolved(sessionId);
+              void setSessionPendingPrompt(sessionId, false);
+            }
+            return late;
+          }
+        }
+
+        await insertResponseRow(responseContent);
 
         // Drive the canonical transformer forward immediately so the
         // associated tool_call event (e.g. developer_git_commit_proposal)

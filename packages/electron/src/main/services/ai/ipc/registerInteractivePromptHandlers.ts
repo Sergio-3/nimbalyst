@@ -1,6 +1,7 @@
 import { registerAskUserQuestionAnswerHandler } from './registerAskUserQuestionAnswerHandler';
 import { AISessionsRepository } from '@nimbalyst/runtime/storage/repositories/AISessionsRepository';
 import { configureCodexQuestionDelivery, deliverCodexQuestionAnswer } from '../codexQuestionDelivery';
+import { configureRequestUserInputResumption } from '../requestUserInputResumption';
 import { TrayManager } from '../../../tray/TrayManager';
 import { safeHandle } from '../../../utils/ipcRegistry';
 import { logger } from '../../../utils/logger';
@@ -22,6 +23,10 @@ import { ipcMain } from 'electron';
  */
 export function registerInteractivePromptHandlers(ctx: AIServiceContext): void {
   configureCodexQuestionDelivery({
+    drive: (sessionId, workspacePath) => ctx.driveQueuedPrompts(sessionId, workspacePath, 'session-idle'),
+    publish: sessionId => ctx.publishQueueStateToSync(sessionId),
+  });
+  configureRequestUserInputResumption({
     drive: (sessionId, workspacePath) => ctx.driveQueuedPrompts(sessionId, workspacePath, 'session-idle'),
     publish: sessionId => ctx.publishQueueStateToSync(sessionId),
   });

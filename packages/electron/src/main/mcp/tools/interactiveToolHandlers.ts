@@ -38,7 +38,10 @@ import { getPermissionService } from "../../services/PermissionService";
 import { SessionCommitService } from "../../services/SessionCommitService";
 import { scopeProposalToRepo } from "../../services/workspaceRepos";
 import { findFreshInteractiveResponse } from "./interactiveResponsePolling";
-import { loadPromptAnswerFacts } from "../../services/ai/requestUserInputResumption";
+import {
+  loadPromptAnswerFacts,
+  notePromptAbandoned,
+} from "../../services/ai/requestUserInputResumption";
 import {
   clearPendingInteractiveWaiter,
   countPendingInteractiveWaiters,
@@ -57,6 +60,10 @@ import {
   shouldTerminalizePrompt,
   type InteractivePromptSettleReason,
 } from "./interactivePromptAbandonment";
+import {
+  getRequestUserInputFallbackResponseChannel,
+  getRequestUserInputResponseChannel,
+} from "./requestUserInputChannels";
 
 export function getInteractiveToolSchemas(sessionId: string | undefined) {
   if (!sessionId) return [];
@@ -1134,18 +1141,7 @@ Prefer this tool over AskUserQuestion when input is richer than a flat list of o
   };
 }
 
-export function getRequestUserInputResponseChannel(
-  sessionId: string,
-  promptId: string,
-): string {
-  return `request-user-input-response:${sessionId || "unknown"}:${promptId}`;
-}
-
-export function getRequestUserInputFallbackResponseChannel(
-  sessionId: string,
-): string {
-  return `request-user-input-response:${sessionId || "unknown"}:__fallback__`;
-}
+export { getRequestUserInputResponseChannel, getRequestUserInputFallbackResponseChannel };
 
 export async function handleRequestUserInput(
   args: any,
@@ -1327,6 +1323,8 @@ export async function handleRequestUserInput(
       settled = true;
       detachCall?.();
       clearPendingInteractiveWaiter(sessionKey);
+      // Nobody waits for this call any more; a later answer resumes the session.
+      if (sessionId && reason === 'client-abandoned') notePromptAbandoned(sessionId, promptId);
       // See handleAskUserQuestion: an abandoned call takes the waiter down but
       // leaves the form standing, because the user has decided nothing.
       const terminalize = shouldTerminalizePrompt({

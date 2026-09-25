@@ -80,6 +80,7 @@ import { registerModelHandlers } from './ipc/registerModelHandlers';
 import { registerProjectSettingsHandlers } from './ipc/registerProjectSettingsHandlers';
 import { registerExtensionChatHandlers } from './ipc/registerExtensionChatHandlers';
 import { SessionProcessingGuard, tryClaimAndDispatchNextQueuedPrompt } from './queuedPromptDispatcher';
+import { persistClaimedPromptAnswer } from './requestUserInputResumption';
 import {
   QueueDriveService,
   type DriveOutcome,
@@ -993,6 +994,11 @@ export class AIService {
           logger.main.info(`[AIService] ${settledSource}: chain settled for session ${settledSessionId}, but a turn is running — leaving it tracked`);
         }
         this.hooklessWatcher.scheduleStop(settledSessionId, 500);
+      },
+      // Fallback for the resume turn's own observer: close the answered form.
+      onDelivered: async (claimed) => {
+        const answeredPrompt = claimed.documentContext?.answeredPrompt;
+        if (answeredPrompt) await persistClaimedPromptAnswer({ sessionId, workspacePath, answeredPrompt });
       },
       onPromptClaimed: ({ sessionId: claimedSessionId, promptId }) => {
         publishQueuedPromptClaim({ sessionId: claimedSessionId, promptId });

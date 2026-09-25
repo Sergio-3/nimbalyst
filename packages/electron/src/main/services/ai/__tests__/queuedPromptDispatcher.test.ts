@@ -182,6 +182,79 @@ describe('queuedPromptDispatcher', () => {
     });
   });
 
+  // A resume turn closes its PromptForUserInput form once delivered; the hook
+  // is the fallback for the turn's own observer and must not cost the row.
+  describe('delivered hook', () => {
+    const claimed: ClaimedQueuedPrompt = { id: 'prompt-1', prompt: 'resume', attachments: null };
+
+    async function dispatch(overrides: {
+      sendMessageHandler?: () => Promise<{ content: string }>;
+      startSession?: () => Promise<void>;
+      onDelivered?: (row: ClaimedQueuedPrompt) => Promise<void>;
+    }) {
+      vi.useFakeTimers();
+      const order: string[] = [];
+      const queueStore: QueuedPromptStoreLike = {
+        listPending: vi.fn(async () => [claimed]),
+        claim: vi.fn(async () => claimed),
+        complete: vi.fn(async () => { order.push('complete'); }),
+        fail: vi.fn(async () => { order.push('fail'); }),
+      };
+      const onDelivered = vi.fn(async (row: ClaimedQueuedPrompt) => {
+        order.push(`delivered:${row.id}`);
+        await overrides.onDelivered?.(row);
+      });
+      const run = dispatchClaimedQueuedPrompt({
+        claimed,
+        continueQueuedPromptChain: vi.fn(async () => {}),
+        logError: vi.fn(),
+        onPromptClaimed: () => {},
+        onDelivered,
+        processingSet: new SessionProcessingGuard(),
+        queueStore,
+        sendMessageHandler: vi.fn(overrides.sendMessageHandler ?? (async () => {
+          order.push('sendMessage');
+          return { content: 'ok' };
+        })),
+        sessionId: 'session-1',
+        source: 'test queue',
+        startSession: vi.fn(overrides.startSession ?? (async () => {})),
+        targetWindow: { isDestroyed: () => false, webContents: { send: vi.fn(), mainFrame: {} } } as unknown as Electron.BrowserWindow,
+        workspacePath: '/workspace/project',
+      });
+      await run.catch(() => {});
+      await vi.runAllTimersAsync();
+      return { order, onDelivered };
+    }
+
+    it('runs after the turn returns and before the row completes', async () => {
+      const { order } = await dispatch({});
+      expect(order).toEqual(['sendMessage', 'delivered:prompt-1', 'complete']);
+    });
+
+    it('does not run when the turn throws', async () => {
+      const { order, onDelivered } = await dispatch({
+        sendMessageHandler: async () => { throw new Error('turn failed'); },
+      });
+      expect(onDelivered).not.toHaveBeenCalled();
+      expect(order).toEqual(['fail']);
+    });
+
+    it('does not fail the row or hold up completion when it throws', async () => {
+      const { order } = await dispatch({
+        onDelivered: async () => { throw new Error('write failed'); },
+      });
+      expect(order).toEqual(['sendMessage', 'delivered:prompt-1', 'complete']);
+    });
+
+    it('does not run when the session cannot start', async () => {
+      const { onDelivered } = await dispatch({
+        startSession: async () => { throw new Error('no session'); },
+      });
+      expect(onDelivered).not.toHaveBeenCalled();
+    });
+  });
+
   it('fires onChainSettled when no follow-on prompt is dispatched', async () => {
     vi.useFakeTimers();
 
