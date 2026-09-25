@@ -41,7 +41,6 @@ import {
   sessionDraftInputAtom,
   sessionLastSubmitAtAtom,
   sessionDraftLocalModifiedAtAtom,
-  markSessionReadAtom,
   type PendingPrompt,
 } from './atoms/sessions';
 import { windowFocusedAtom } from './atoms/windowFocus';
@@ -54,7 +53,6 @@ import {
   markSessionUnreadAtom,
   clearSessionUnreadAtom,
   markSessionTurnActivityAtom,
-  globalSessionActivityAtom,
 } from './atoms/sessionActivity';
 import type { TranscriptEvent } from '@nimbalyst/runtime/ai/server/transcript/types';
 import { TranscriptStreamAccumulator } from './transcriptStreamAccumulator';
@@ -629,15 +627,28 @@ export function initSessionStateListeners(): () => void {
 
     // Mark as unread if this is an output message (agent response) and the session
     // is not currently being viewed. A selected session only counts as viewed
-    // while this window is focused -- otherwise a session left selected in a
-    // background window never reports that it finished, and the read-sync below
-    // would also clear the tray hint main set on completion.
+    // while this window is focused and its project is the one on screen (the
+    // multi-project rail hosts several projects in one window) -- otherwise a
+    // session left selected in the background never reports that it finished,
+    // and the read-sync below would also clear the tray hint main set on
+    // completion. Regaining focus or switching back to the project does not
+    // mark it read; selecting the session does.
     if (direction === 'output') {
-      const currentlyViewedSessionId = store.get(windowFocusedAtom)
+      const visibleWorkspacePath = store.get(activeWorkspacePathAtom);
+      const isOnScreen = store.get(windowFocusedAtom)
+        && (visibleWorkspacePath === null || visibleWorkspacePath === workspacePath);
+      const currentlyViewedSessionId = isOnScreen
         ? getCurrentlyViewedSessionId(workspacePath)
         : null;
 
       if (sessionId !== currentlyViewedSessionId) {
+        // A read-sync scheduled while the session was still on screen must not
+        // clear this unread state after the fact.
+        const pendingReadTimer = readStateSyncTimers.get(sessionId);
+        if (pendingReadTimer) {
+          clearTimeout(pendingReadTimer);
+          readStateSyncTimers.delete(sessionId);
+        }
         store.set(sessionUnreadAtom(sessionId), true);
         store.set(markSessionUnreadAtom, { sessionId, workspacePath });
 
@@ -1124,19 +1135,6 @@ export function initSessionStateListeners(): () => void {
   let cleanupTranscriptSessionReparsed: (() => void) | undefined;
   let cleanupMessagesLoggedBatch: (() => void) | undefined;
 
-  // When this window regains focus, the selected session that went unread
-  // while it was in the background is now being read.
-  const cleanupWindowFocusRead = store.sub(windowFocusedAtom, () => {
-    if (!store.get(windowFocusedAtom)) return;
-    for (const [workspacePath, activity] of store.get(globalSessionActivityAtom)) {
-      const viewedId = getCurrentlyViewedSessionId(workspacePath);
-      if (viewedId && activity.unread.has(viewedId)) {
-        store.set(clearSessionUnreadAtom, { sessionId: viewedId, workspacePath });
-        store.set(markSessionReadAtom, viewedId);
-      }
-    }
-  });
-
   if (window.electronAPI?.on) {
     cleanupTranscriptEvent = window.electronAPI.on('transcript:event', handleTranscriptEvent);
     cleanupTranscriptSessionReparsed = window.electronAPI.on('transcript:session-reparsed', handleTranscriptSessionReparsed);
@@ -1221,7 +1219,6 @@ export function initSessionStateListeners(): () => void {
     cleanupPendingNotificationNavigation?.();
     cleanupSyncReadState?.();
     cleanupSyncDraftInput?.();
-    cleanupWindowFocusRead();
     cleanupTranscriptEvent?.();
     cleanupTranscriptSessionReparsed?.();
     transcriptAccumulator.clear();
