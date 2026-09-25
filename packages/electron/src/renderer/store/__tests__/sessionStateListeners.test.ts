@@ -32,9 +32,10 @@ import {
 import {
   globalSessionActivityAtom,
   globalSessionTurnActivityAtom,
+  markSessionUnreadAtom,
 } from '../atoms/sessionActivity';
 import { windowFocusedAtom } from '../atoms/windowFocus';
-import { activeWorkspacePathAtom, openProjectsAtom } from '../atoms/openProjects';
+import { activeWorkspacePathAtom, multiProjectModeAtom, openProjectsAtom } from '../atoms/openProjects';
 import { activeExtensionPanelAtom, activeExtensionBottomPanelAtom } from '../atoms/extensionPanels';
 import { resetWindowMode, windowModeAtom } from '../atoms/windowMode';
 import {
@@ -45,6 +46,7 @@ import {
 } from '../atoms/workstreamState';
 import { TranscriptStreamAccumulator } from '../transcriptStreamAccumulator';
 import { errorNotificationService } from '../../services/ErrorNotificationService';
+import { selectSessionActionAtom } from '../actions/sessionHistoryActions';
 
 function seedRegistry(entries: Array<Partial<SessionMeta> & { id: string }>): void {
   const map = new Map(store.get(sessionRegistryAtom));
@@ -1133,7 +1135,7 @@ describe('unread: selected session in an unfocused window', () => {
     }
   });
 
-  it('marks the selected session read when its window regains focus', () => {
+  it('keeps the selected session unread when its window regains focus', () => {
     const sid = uniqueSessionId('refocus-selected');
     seedRegistry([{ id: sid }]);
     selectSession(sid);
@@ -1144,8 +1146,167 @@ describe('unread: selected session in an unfocused window', () => {
 
     store.set(windowFocusedAtom, true);
 
+    expect(store.get(sessionUnreadAtom(sid))).toBe(true);
+    expect(store.get(globalSessionActivityAtom).get(WS)?.unread.has(sid) ?? false).toBe(true);
+    expect(readSyncCalls(sid)).toHaveLength(0);
+  });
+});
+
+// With the multi-project rail one focused window hosts several projects, and
+// only the one in `activeWorkspacePathAtom` is on screen. A session selected
+// in a hidden rail project is not being read, even though the window has focus.
+describe('unread: selected session in a hidden rail project', () => {
+  const WS_A = '/ws/rail-a';
+  const WS_B = '/ws/rail-b';
+
+  function selectSessionIn(workspacePath: string, sessionId: string): void {
+    initWorkstreamState(workspacePath);
+    store.set(selectedWorkstreamAtom(workspacePath), { type: 'session', id: sessionId });
+  }
+
+  function hasUnreadWrites(sessionId: string): boolean[] {
+    const invoke = window.electronAPI.invoke as ReturnType<typeof vi.fn>;
+    return invoke.mock.calls
+      .filter(([channel, id, payload]) =>
+        channel === 'ai:updateSessionMetadata' && id === sessionId && typeof payload?.metadata?.hasUnread === 'boolean')
+      .map(([, , payload]) => payload.metadata.hasUnread);
+  }
+
+  function isUnreadInActivity(workspacePath: string, sessionId: string): boolean {
+    return store.get(globalSessionActivityAtom).get(workspacePath)?.unread.has(sessionId) ?? false;
+  }
+
+  function logOutput(sessionId: string, workspacePath: string): void {
+    handlers.get('ai:message-logged')!({ sessionId, direction: 'output', workspacePath });
+  }
+
+  // The state a hidden-project answer leaves behind (see the first test of
+  // this block), so a test can measure only what happens afterwards.
+  function seedUnread(sessionId: string, workspacePath: string): void {
+    store.set(sessionUnreadAtom(sessionId), true);
+    store.set(markSessionUnreadAtom, { sessionId, workspacePath });
+    expect(isUnreadInActivity(workspacePath, sessionId)).toBe(true);
+  }
+
+  afterEach(() => {
+    store.set(windowFocusedAtom, false);
+    store.set(multiProjectModeAtom, false);
+    store.set(selectedWorkstreamAtom(WS_A), null);
+    store.set(selectedWorkstreamAtom(WS_B), null);
+  });
+
+  it('marks a session unread when it answers while another rail project is visible in the focused window', async () => {
+    vi.useFakeTimers();
+    try {
+      const sid = uniqueSessionId('rail-hidden');
+      seedRegistry([{ id: sid, workspaceId: WS_A }]);
+      store.set(multiProjectModeAtom, true);
+      selectSessionIn(WS_A, sid);
+      store.set(activeWorkspacePathAtom, WS_B);
+      store.set(windowFocusedAtom, true);
+
+      logOutput(sid, WS_A);
+      await vi.advanceTimersByTimeAsync(6_000);
+
+      expect(store.get(sessionUnreadAtom(sid))).toBe(true);
+      expect(hasUnreadWrites(sid)).toContain(true);
+      expect(hasUnreadWrites(sid)).not.toContain(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a hidden rail project session unread when the window regains focus on another project', () => {
+    const sid = uniqueSessionId('rail-refocus');
+    seedRegistry([{ id: sid, workspaceId: WS_A }]);
+    store.set(multiProjectModeAtom, true);
+    selectSessionIn(WS_A, sid);
+    store.set(activeWorkspacePathAtom, WS_B);
+    store.set(windowFocusedAtom, false);
+
+    logOutput(sid, WS_A);
+    expect(store.get(sessionUnreadAtom(sid))).toBe(true);
+
+    store.set(windowFocusedAtom, true);
+
+    expect(store.get(sessionUnreadAtom(sid))).toBe(true);
+    expect(isUnreadInActivity(WS_A, sid)).toBe(true);
+    expect(hasUnreadWrites(sid)).not.toContain(false);
+  });
+
+  // Only selecting the session reads it -- switching back to its project does not.
+  it('keeps the selected session unread when its rail project becomes visible again', () => {
+    const sid = uniqueSessionId('rail-switch-back');
+    seedRegistry([{ id: sid, workspaceId: WS_A }]);
+    store.set(multiProjectModeAtom, true);
+    selectSessionIn(WS_A, sid);
+    store.set(activeWorkspacePathAtom, WS_B);
+    store.set(windowFocusedAtom, true);
+    seedUnread(sid, WS_A);
+
+    store.set(activeWorkspacePathAtom, WS_A);
+
+    expect(store.get(sessionUnreadAtom(sid))).toBe(true);
+    expect(isUnreadInActivity(WS_A, sid)).toBe(true);
+    expect(hasUnreadWrites(sid)).not.toContain(false);
+  });
+
+  it('marks an unread session read when it is clicked while already selected', async () => {
+    const sid = uniqueSessionId('rail-reclick');
+    seedRegistry([{ id: sid, workspaceId: WS_A }]);
+    store.set(multiProjectModeAtom, true);
+    selectSessionIn(WS_A, sid);
+    store.set(activeWorkspacePathAtom, WS_A);
+    store.set(windowFocusedAtom, true);
+    seedUnread(sid, WS_A);
+
+    await store.set(selectSessionActionAtom, sid);
+
     expect(store.get(sessionUnreadAtom(sid))).toBe(false);
-    expect(store.get(globalSessionActivityAtom).get(WS)?.unread.has(sid) ?? false).toBe(false);
-    expect(readSyncCalls(sid)).toHaveLength(1);
+    expect(isUnreadInActivity(WS_A, sid)).toBe(false);
+    expect(hasUnreadWrites(sid)).toContain(false);
+  });
+
+  it('does not let a pending read-sync clear the unread state set after the window lost focus', async () => {
+    vi.useFakeTimers();
+    try {
+      const sid = uniqueSessionId('read-sync-race');
+      seedRegistry([{ id: sid, workspaceId: WS_A }]);
+      selectSessionIn(WS_A, sid);
+      store.set(activeWorkspacePathAtom, WS_A);
+      store.set(windowFocusedAtom, true);
+
+      logOutput(sid, WS_A); // read branch: schedules the 5 s read-sync
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      store.set(windowFocusedAtom, false);
+      logOutput(sid, WS_A); // unread branch: hasUnread:true
+      expect(store.get(sessionUnreadAtom(sid))).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(hasUnreadWrites(sid).at(-1)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the selected session read in single-project mode while its project is visible and focused', async () => {
+    vi.useFakeTimers();
+    try {
+      const sid = uniqueSessionId('single-visible');
+      seedRegistry([{ id: sid, workspaceId: WS_A }]);
+      selectSessionIn(WS_A, sid);
+      store.set(activeWorkspacePathAtom, WS_A);
+      store.set(windowFocusedAtom, true);
+
+      logOutput(sid, WS_A);
+      await vi.advanceTimersByTimeAsync(6_000);
+
+      expect(store.get(sessionUnreadAtom(sid))).toBe(false);
+      expect(hasUnreadWrites(sid)).toEqual([false]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
