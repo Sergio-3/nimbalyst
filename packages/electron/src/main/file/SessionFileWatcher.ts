@@ -19,6 +19,9 @@ const BINARY_EXTENSIONS = new Set([
   '.dmg', '.deb', '.rpm', '.snap', '.msi', '.nupkg',
 ]);
 
+/** Matches FileSnapshotCache's per-file cap; larger files are never snapshotted. */
+const MAX_SNAPSHOT_FILE_BYTES = 1_000_000;
+
 /** TTL for editor save markers (ms). Must exceed chokidar's awaitWriteFinish delay. */
 const EDITOR_SAVE_TTL_MS = 2000;
 const FILE_CHANGED_NOTIFY_DEDUPE_MS = 250;
@@ -135,6 +138,23 @@ export class SessionFileWatcher {
     return BINARY_EXTENSIONS.has(path.extname(filePath).toLowerCase());
   }
 
+  /**
+   * Current disk content, or null when the file is gone, too large, or binary.
+   * The extension check misses extensionless binaries (browser profile caches,
+   * SQLite journals); without the size cap and NUL sniff, every session read
+   * and cached them in full on each write (#1599).
+   */
+  private async readTextContent(filePath: string): Promise<string | null> {
+    try {
+      const stat = await fs.stat(filePath);
+      if (stat.size > MAX_SNAPSHOT_FILE_BYTES) return null;
+      const content = await fs.readFile(filePath, 'utf-8');
+      return content.includes('\0') ? null : content;
+    } catch {
+      return null;
+    }
+  }
+
   private async handleChange(filePath: string): Promise<void> {
     if (!this.active || !this.cache || !this.sessionId || !this.workspacePath) return;
     if (this.isBinaryPath(filePath)) return;
@@ -147,14 +167,11 @@ export class SessionFileWatcher {
         filePath,
       });
 
-      const beforeContent = await this.cache.getBeforeState(filePath);
+      // File may have been deleted between event and read, or be too large / binary to diff
+      const currentContent = await this.readTextContent(filePath);
+      if (currentContent === null) return;
 
-      let currentContent: string;
-      try {
-        currentContent = await fs.readFile(filePath, 'utf-8');
-      } catch {
-        return; // File may have been deleted between event and read
-      }
+      const beforeContent = await this.cache.getBeforeState(filePath);
 
       if (beforeContent !== null && beforeContent === currentContent) {
         logger.main.debug('[SessionFileWatcher] No-op skip (content unchanged):', {
@@ -199,7 +216,10 @@ export class SessionFileWatcher {
     if (!this.isPathInWorkspace(filePath, this.workspacePath)) return;
 
     try {
-      // Check if we already have a cached state for this file BEFORE reading the new content.
+      // File may have been deleted already, or be too large / binary to diff
+      const currentContent = await this.readTextContent(filePath);
+      if (currentContent === null) return;
+
       // Atomic writes (write-to-temp then rename) trigger 'rename' events on macOS,
       // which get classified as 'add'. If the cache already has content for this path,
       // this is an overwrite of an existing file, not a truly new file creation.
@@ -210,14 +230,6 @@ export class SessionFileWatcher {
         filePath,
         hasExistingCache: beforeContent !== null,
       });
-
-      let currentContent: string;
-      try {
-        currentContent = await fs.readFile(filePath, 'utf-8');
-      } catch {
-        // File may have been deleted already
-        return;
-      }
 
       // If we had cached content and it matches the new content, skip (no real change)
       if (beforeContent !== null && beforeContent === currentContent) {

@@ -10,10 +10,12 @@ const {
   capturedListeners,
   subscriberCountRef,
   mockReadFile,
+  mockStat,
 } = vi.hoisted(() => ({
   capturedListeners: new Map<string, WorkspaceEventListener>(),
   subscriberCountRef: { value: 0 },
   mockReadFile: vi.fn(),
+  mockStat: vi.fn(),
 }));
 
 // Mock electron
@@ -61,6 +63,7 @@ vi.mock('../WorkspaceEventBus', () => ({
 // Mock fs/promises
 vi.mock('fs/promises', () => ({
   readFile: (...args: any[]) => mockReadFile(...args),
+  stat: (...args: any[]) => mockStat(...args),
 }));
 
 import * as bus from '../WorkspaceEventBus';
@@ -134,6 +137,7 @@ describe('SessionFileWatcher', () => {
       }
       return Promise.resolve('');
     });
+    mockStat.mockResolvedValue({ size: 100 });
   });
 
   describe('start/stop lifecycle', () => {
@@ -281,6 +285,40 @@ describe('SessionFileWatcher', () => {
       fireChange('/test/workspace/image.png');
 
       expect(cache.getBeforeState).not.toHaveBeenCalled();
+      expect(callback).not.toHaveBeenCalled();
+
+      await watcher.stop();
+    });
+
+    it('never snapshots extensionless binary content (#1599: Chrome profile churn)', async () => {
+      const cache = createMockCache();
+      const callback = vi.fn();
+      const watcher = new SessionFileWatcher();
+      const journal = '/test/workspace/audit/prof-1/Default/History-journal';
+      setMockFileContent(journal, 'SQLite\u0000\u0000journal');
+
+      await watcher.start(workspacePath, sessionId, cache, callback);
+      fireChange(journal);
+      fireAdd(journal);
+      await flush();
+
+      expect(callback).not.toHaveBeenCalled();
+      expect(cache.updateSnapshot).not.toHaveBeenCalled();
+
+      await watcher.stop();
+    });
+
+    it('does not read files over the snapshot size cap', async () => {
+      const cache = createMockCache();
+      const callback = vi.fn();
+      const watcher = new SessionFileWatcher();
+      mockStat.mockResolvedValue({ size: 5_000_000 });
+
+      await watcher.start(workspacePath, sessionId, cache, callback);
+      fireChange('/test/workspace/audit/prof-1/Default/Cache/Cache_Data/f_000001');
+      await flush();
+
+      expect(mockReadFile).not.toHaveBeenCalled();
       expect(callback).not.toHaveBeenCalled();
 
       await watcher.stop();

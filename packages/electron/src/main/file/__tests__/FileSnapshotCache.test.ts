@@ -299,6 +299,23 @@ describe('FileSnapshotCache', () => {
       const content = await cache.getBeforeState(filePath);
       expect(content).toBe('updated content');
     });
+
+    it('warns once per session when the memory cap is reached, not once per file', async () => {
+      setupGitMocks();
+
+      const cache = new FileSnapshotCache();
+      await cache.startSession(workspacePath, 'session-1');
+
+      cache.updateSnapshot(path.resolve(workspacePath, 'big.txt'), 'a'.repeat(99_999_990));
+      for (let i = 0; i < 5; i++) {
+        cache.updateSnapshot(path.resolve(workspacePath, `overflow-${i}.txt`), 'overflow content');
+      }
+
+      const capWarnings = vi.mocked(logger.main.warn).mock.calls
+        .filter(([message]) => String(message).includes('Memory cap reached'));
+      expect(capWarnings).toHaveLength(1);
+      expect(cache.hasSnapshot(path.resolve(workspacePath, 'overflow-0.txt'))).toBe(false);
+    });
   });
 
   describe('hasSnapshot', () => {
