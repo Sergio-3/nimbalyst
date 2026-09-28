@@ -113,7 +113,7 @@ describe('1M variant lists', () => {
   });
 
   it('offers -1m rows for the dateless opus/fable aliases only', () => {
-    // sonnet: Sonnet 5 has no 200K variant and no `[1m]` suffix — a dead row.
+    // sonnet: Sonnet 5.x has no 200K variant and no `[1m]` suffix — a dead row.
     // haiku: no 1M window.
     // Pinned legacy models retain their existing single picker row.
     expect([...CLAUDE_CODE_VARIANTS_WITH_1M].sort()).toEqual(['fable', 'opus']);
@@ -131,6 +131,7 @@ describe('baseContextWindowForVariant', () => {
     expect(baseContextWindowForVariant('opus')).toBe(1_000_000);
     expect(baseContextWindowForVariant('fable')).toBe(1_000_000);
     expect(baseContextWindowForVariant('sonnet')).toBe(1_000_000);
+    expect(baseContextWindowForVariant('sonnet-5')).toBe(1_000_000);
     // Legacy pinned variants are 1M too — single row, no redundant -1m duplicate.
     expect(baseContextWindowForVariant('opus-4-6')).toBe(1_000_000);
     expect(baseContextWindowForVariant('opus-4-7')).toBe(1_000_000);

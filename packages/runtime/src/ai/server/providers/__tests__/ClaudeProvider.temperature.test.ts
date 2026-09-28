@@ -76,6 +76,7 @@ describe('ClaudeProvider.supportsTemperature', () => {
 
     it('returns false for a future dated/minor Sonnet 5 id', () => {
       expect(ClaudeProvider.supportsTemperature('claude-sonnet-5-1')).toBe(false);
+      expect(ClaudeProvider.supportsTemperature('claude-sonnet-5-5')).toBe(false);
       expect(ClaudeProvider.supportsTemperature('claude-sonnet-6')).toBe(false);
     });
 

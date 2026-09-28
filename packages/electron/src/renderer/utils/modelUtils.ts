@@ -274,11 +274,14 @@ export function supportsEffortLevel(modelId?: string): boolean {
   const variant = extractClaudeCodeVariant(modelId);
   if (
     variant === 'fable' ||
+    variant === 'fable-5' ||
     variant === 'opus' ||
     variant === 'opus-5' ||
+    variant === 'opus-4-8' ||
     variant === 'opus-4-7' ||
     variant === 'opus-4-6' ||
     variant === 'sonnet' ||
+    variant === 'sonnet-5' ||
     variant === 'sonnet-4-6'
   ) return true;
   // OpenAI Codex models support reasoning effort (both SDK and ACP transports)

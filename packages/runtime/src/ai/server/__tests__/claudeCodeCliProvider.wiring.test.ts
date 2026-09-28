@@ -71,7 +71,7 @@ describe('claude-code-cli provider wiring (Phase 0)', () => {
     });
 
     it('appends the [1m] beta marker for extended context', () => {
-      expect(resolveClaudeCodeModelVariant('claude-code-cli:sonnet-1m', 'opus')).toBe('sonnet[1m]');
+      expect(resolveClaudeCodeModelVariant('claude-code-cli:sonnet-1m', 'opus')).toBe('claude-sonnet-5-5[1m]');
     });
   });
 

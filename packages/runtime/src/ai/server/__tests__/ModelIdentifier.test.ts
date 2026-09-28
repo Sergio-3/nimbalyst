@@ -126,6 +126,13 @@ describe('ModelIdentifier', () => {
       expect(id.combined).toBe('claude-code:opus');
     });
 
+    it.each(['claude-code', 'claude-code-cli'] as const)('normalizes sonnet-5-5 to canonical sonnet and keeps sonnet-5 pinned for %s', (provider) => {
+      expect(ModelIdentifier.create(provider, 'Sonnet-5-5').combined).toBe(`${provider}:sonnet`);
+      const pinned = ModelIdentifier.parse(`${provider}:sonnet-5-1m`);
+      expect(pinned.combined).toBe(`${provider}:sonnet-5-1m`);
+      expect(pinned.baseVariant).toBe('sonnet-5');
+    });
+
     it.each(['claude-code', 'claude-code-cli'] as const)('preserves an explicit Opus 5 selection for %s', (provider) => {
       const id = ModelIdentifier.create(provider, 'Opus-5-1M');
       expect(id.combined).toBe(`${provider}:opus-5-1m`);
