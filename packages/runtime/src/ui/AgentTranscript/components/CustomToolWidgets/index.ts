@@ -83,6 +83,11 @@ export interface CustomToolWidgetProps {
   readFile?: (filePath: string) => Promise<{ success: boolean; content?: string; error?: string }>;
   /** Resolve history-derived file changes after explicit user disclosure. */
   loadToolCallDiffs?: () => Promise<ToolCallDiffLoadResult>;
+  /**
+   * Question tools only: the user sent a new message instead of answering, so
+   * the question is closed even if no terminal result was written for it.
+   */
+  superseded?: boolean;
   // Note: Interactive widgets read their host from interactiveWidgetHostAtom(sessionId)
   // No host prop needed - avoids prop drilling through the component tree
 }

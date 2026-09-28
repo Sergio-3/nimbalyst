@@ -2,7 +2,7 @@ import { ipcMain } from "electron";
 import { reservePromptAnswer } from '../services/ai/PromptAnswerReservation';
 import { cancelCommitProposalOnce, acceptsCommitProposalResponse } from '../services/ai/CommitProposalExecution';
 import { hasLiveInteractivePrompt } from "../mcp/tools/interactivePromptLiveness";
-import { getRequestUserInputResponseChannel } from "../mcp/tools/requestUserInputChannels";
+import { getRequestUserInputResponseChannel } from "../mcp/tools/interactivePromptFallback";
 import { SessionCommitService } from "../services/SessionCommitService";
 import { TranscriptMigrationRepository } from "@nimbalyst/runtime/storage/repositories/TranscriptMigrationRepository";
 import { AISessionsRepository } from "@nimbalyst/runtime/storage/repositories/AISessionsRepository";
@@ -17,6 +17,7 @@ import {
 import { setSessionPendingPrompt } from "../services/ai/pendingPromptPersistence";
 import { deliverCodexQuestionAnswer } from "../services/ai/codexQuestionDelivery";
 import { answerPromptForUserInput } from "../services/ai/requestUserInputResumption";
+import { isInteractivePromptClosed } from "../services/ai/questionTerminalResultLookup";
 
 export function registerSessionPromptResponseHandler(): void {
   /**
@@ -60,6 +61,15 @@ export function registerSessionPromptResponseHandler(): void {
             });
           }
           return result;
+        }
+        // A form closed by a newer user turn (or already answered) must not be
+        // answered again, and must never reach the session fallback channel
+        // where it could settle a newer form with these answers.
+        if (
+          promptType === "request_user_input_request" &&
+          (await isInteractivePromptClosed(sessionId, promptId))
+        ) {
+          return { success: false, error: "This form is already closed." };
         }
         const { database } = await import("../database/PGLiteDatabaseWorker");
         const timestamp = Date.now();

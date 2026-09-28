@@ -19,6 +19,7 @@ import { atom } from 'jotai';
 import { atomFamily } from '../debug/atomFamilyRegistry';
 import { store } from '@nimbalyst/runtime/store';
 import { ModelIdentifier, type ChatAttachment, type SessionData } from '@nimbalyst/runtime/ai/server/types';
+import { stripMcpPrefix } from '@nimbalyst/runtime/ai/server/interactivePromptTools';
 import type { SessionMeta } from '@nimbalyst/runtime';
 import deepEqual from 'fast-deep-equal';
 import { captureTranscriptMessages, reconcileTranscriptMessages } from '../transcriptReconciliation';
@@ -332,9 +333,7 @@ const INTERACTIVE_PROMPT_TOOLS = new Set([
 // MCP tools arrive as `mcp__<server>__<toolName>` (server name may contain dashes).
 // Match the bare name first; if not found, peel off the MCP prefix and recheck.
 export function isInteractivePromptTool(toolName: string): boolean {
-  if (INTERACTIVE_PROMPT_TOOLS.has(toolName)) return true;
-  const match = toolName.match(/^mcp__[^_]+(?:_[^_]+)*__(.+)$/);
-  return !!match && INTERACTIVE_PROMPT_TOOLS.has(match[1]);
+  return INTERACTIVE_PROMPT_TOOLS.has(toolName) || INTERACTIVE_PROMPT_TOOLS.has(stripMcpPrefix(toolName));
 }
 
 /**

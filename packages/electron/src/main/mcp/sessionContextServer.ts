@@ -147,6 +147,8 @@ async function handleGetSessionSummary(
   // Keep actionable interactive prompts at the end of every summary. Raw
   // prompt rows are filtered in SQL so large sessions do not need to load their
   // complete transcript just to find an unmatched question.
+  // Synthetic terminal rows (e.g. a question superseded by a new user turn)
+  // carry only the tool_use_id, so they are matched by their row type.
   const { rows: promptRows } = await db.query<{ content: string }>(
     `SELECT content FROM ai_agent_messages
      WHERE session_id = $1
@@ -163,6 +165,7 @@ async function handleGetSessionSummary(
          OR content LIKE '%permission_response%'
          OR content LIKE '%git_commit_proposal%'
          OR content LIKE '%exit_plan_mode_%'
+         OR content LIKE '%nimbalyst_tool_result%'
        )
      ORDER BY id ASC`,
     [sessionId]

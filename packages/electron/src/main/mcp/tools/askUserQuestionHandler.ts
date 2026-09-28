@@ -20,6 +20,7 @@ import {
   type InteractivePromptCallExtra,
 } from "./interactivePromptKeepalive";
 import {
+  settleReasonFromResponse,
   shouldTerminalizePrompt,
   type InteractivePromptSettleReason,
 } from "./interactivePromptAbandonment";
@@ -307,6 +308,7 @@ export async function handleAskUserQuestion(
             result: {
               answers: cancelled ? {} : answers,
               cancelled,
+              ...(reason === "superseded" ? { reason } : {}),
               respondedBy,
               respondedAt: Date.now(),
             },
@@ -345,6 +347,7 @@ export async function handleAskUserQuestion(
               type: "text",
               text: JSON.stringify({
                 cancelled: true,
+                ...(reason === "superseded" ? { reason } : {}),
                 respondedBy,
                 respondedAt: Date.now(),
               }),
@@ -376,8 +379,9 @@ export async function handleAskUserQuestion(
         answers?: Record<string, string>;
         cancelled?: boolean;
         respondedBy?: "desktop" | "mobile";
+        reason?: string;
       }
-    ) => settle(result, "ipc-specific");
+    ) => settle(result, "ipc-specific", settleReasonFromResponse(result));
 
     const onSessionFallbackResponse = (
       _event: unknown,
@@ -386,9 +390,10 @@ export async function handleAskUserQuestion(
         answers?: Record<string, string>;
         cancelled?: boolean;
         respondedBy?: "desktop" | "mobile";
+        reason?: string;
       }
     ) => {
-      settle(result, "ipc-fallback");
+      settle(result, "ipc-fallback", settleReasonFromResponse(result));
     };
 
     if (isCodex) {

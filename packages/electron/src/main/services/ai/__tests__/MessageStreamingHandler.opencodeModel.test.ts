@@ -151,6 +151,9 @@ vi.mock("../mobilePushRequest", () => ({
   requestMobilePush: vi.fn(),
 }));
 
+vi.mock("../supersedeOpenQuestions", () => ({
+  supersedeOpenQuestions: vi.fn(async () => ({ superseded: [], skipped: [] })),
+}));
 vi.mock("../pendingPromptPersistence", () => ({
   setSessionPendingPrompt: vi.fn(),
 }));

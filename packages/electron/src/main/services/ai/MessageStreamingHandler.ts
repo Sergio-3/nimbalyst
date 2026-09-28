@@ -3,6 +3,7 @@ import { warnIfUnpublished } from '@nimbalyst/runtime/sync/pushOutcome';
 import type { SessionChange } from '@nimbalyst/runtime/sync/types';
 import { sessionInbox } from './sessionInboxService';
 import { codexQuestionTurns } from './codexQuestionTurns';
+import { supersedeOpenQuestions } from './supersedeOpenQuestions';
 /**
  * Streaming message handler for AIService.
  *
@@ -1343,6 +1344,7 @@ export class MessageStreamingHandler {
       inboxTurn = ['claude-code', 'openai-codex'].includes(session.provider)
         ? await sessionInbox.begin(session.id, session.workspacePath ?? workspacePath) : undefined;
       questionTurn = session.provider === 'openai-codex' ? codexQuestionTurns.begin(session.id) : undefined;
+      await supersedeOpenQuestions({ sessionId: session.id, provider: session.provider, context: documentContext });
       let fullResponse = '';
       let lastTextSection = '';  // Track text after the last tool call (for notifications)
       let prevTextSection = '';  // Previous non-empty text section (fallback if last section is empty)

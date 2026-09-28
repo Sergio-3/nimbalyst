@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { VList, type VListHandle, type CacheSnapshot } from 'virtua';
 import type { TranscriptViewMessage, SessionData } from '../../../ai/server/types';
 import type { ToolCallDiffLoadResult } from '../../../ai/server/transcript';
-import { isInteractiveWidgetTool, stripMcpPrefix } from '../../../ai/server/interactivePromptTools';
+import { isInteractiveWidgetTool, partitionUnansweredQuestions, stripMcpPrefix } from '../../../ai/server/interactivePromptTools';
 import type { TranscriptSettings } from '../types';
 import { MessageSegment } from './MessageSegment';
 import { MarkdownRenderer, type TranscriptFileLocation } from './MarkdownRenderer';
@@ -1325,21 +1325,23 @@ export const RichTranscriptView = React.forwardRef<
     [currentTeammates]
   );
 
+  // Question tool calls with no result, split by the last user message. The
+  // superseded ones render as skipped even when no durable result row exists
+  // (older transcripts).
+  const unansweredQuestions = useMemo(() => partitionUnansweredQuestions(messages), [messages]);
+  const skippedQuestionIds = useMemo(
+    () => new Set(unansweredQuestions.superseded.map(question => question.id)),
+    [unansweredQuestions]
+  );
+
   // Determine if we're waiting for a response (used for scroll behavior and UI)
   const isWaitingForResponse = useMemo(() => {
     // Session is waiting for the USER to answer — not thinking, don't show the indicator.
     // Check the prop (live IPC state) AND scan messages directly (survives session reloads).
     if (hasPendingInteractivePrompt) return false;
-    // Match BOTH the bare tool name and the MCP-prefixed form
-    // (`mcp__nimbalyst-mcp__AskUserQuestion`); strict equality on just the
-    // bare name left the "Thinking…" indicator rendered on top of the
-    // already-rendered AskUserQuestion widget.
-    const hasPendingQuestion = messages.some(
-      msg => isToolLikeMessage(msg)
-        && !!msg.toolCall
-        && stripMcpPrefix(msg.toolCall.toolName ?? '') === 'AskUserQuestion'
-        && !msg.toolCall.result
-    );
+    // Only an OPEN question means the agent is waiting on the user. A question
+    // the user moved past by sending a new message must not hide Thinking.
+    const hasPendingQuestion = unansweredQuestions.open.length > 0;
     if (hasPendingQuestion) return false;
     // Check isProcessing prop first (most reliable for queued prompts from mobile)
     if (isProcessing) return true;
@@ -1350,7 +1352,7 @@ export const RichTranscriptView = React.forwardRef<
     }
     if (runningTeammates.length > 0) return true;
     return false;
-  }, [messages, sessionStatus, isProcessing, hasPendingInteractivePrompt, runningTeammates]);
+  }, [messages, sessionStatus, isProcessing, hasPendingInteractivePrompt, runningTeammates, unansweredQuestions]);
 
   /**
    * Anchored to the last user message, the same anchor "Finished in ..." uses.
@@ -1741,6 +1743,7 @@ export const RichTranscriptView = React.forwardRef<
               sessionId={sessionId}
               readFile={readFile}
               loadToolCallDiffs={lazyDiffLoader}
+              superseded={tool.providerToolCallId ? skippedQuestionIds.has(tool.providerToolCallId) : undefined}
             />
           </ToolWidgetErrorBoundary>
         </div>

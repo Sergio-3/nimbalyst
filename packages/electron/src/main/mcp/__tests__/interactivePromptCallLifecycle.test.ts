@@ -8,7 +8,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import { attachInteractivePromptCall } from '../tools/interactivePromptKeepalive';
-import { shouldTerminalizePrompt } from '../tools/interactivePromptAbandonment';
+import { settleReasonFromResponse, shouldTerminalizePrompt } from '../tools/interactivePromptAbandonment';
 
 describe('shouldTerminalizePrompt', () => {
   // A question in an old, dead session stays answerable: answering it persists
@@ -30,6 +30,15 @@ describe('shouldTerminalizePrompt', () => {
     for (const kind of ['ask_user_question', 'request_user_input', 'git_commit_proposal', 'tool_permission'] as const) {
       expect(shouldTerminalizePrompt({ kind, reason: 'user-responded' })).toBe(true);
     }
+  });
+
+  // NIM-7240: a new user turn closes the question for good, unlike a stop.
+  it('closes out a question a waiter settles as superseded', () => {
+    const reason = settleReasonFromResponse({ reason: 'superseded' });
+    expect(reason).toBe('superseded');
+    expect(shouldTerminalizePrompt({ kind: 'ask_user_question', reason })).toBe(true);
+    expect(shouldTerminalizePrompt({ kind: 'request_user_input', reason })).toBe(true);
+    expect(settleReasonFromResponse({})).toBe('user-responded');
   });
 });
 

@@ -8,7 +8,7 @@ import { TrayManager } from '../../../tray/TrayManager';
 import { safeHandle } from '../../../utils/ipcRegistry';
 import { logger } from '../../../utils/logger';
 import { getSyncProvider } from '../../SyncManager';
-import { persistAskUserQuestionTerminalResult } from '.././askUserQuestionFallbackResolution';
+import { persistInteractivePromptTerminalResult } from '.././askUserQuestionFallbackResolution';
 import { buildToolPermissionResponseRecord } from '.././claudeCliToolPermission';
 import { setSessionPendingPrompt } from '.././pendingPromptPersistence';
 import { type AIServiceContext } from './AIServiceContext';
@@ -200,7 +200,7 @@ export function registerInteractivePromptHandlers(ctx: AIServiceContext): void {
       // Issue #1116: clearing the pending-prompt bit dismissed the session-level
       // indicator but left the tool call pending, so the cancelled widget came
       // back on the next session switch. Write the terminal result too.
-      await persistAskUserQuestionTerminalResult({
+      await persistInteractivePromptTerminalResult({
         sessionId: resolvedSessionId,
         questionId,
         answers: {},

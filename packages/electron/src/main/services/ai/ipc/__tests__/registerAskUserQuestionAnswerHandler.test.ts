@@ -53,6 +53,11 @@ vi.mock("@nimbalyst/runtime/ai/server/SessionStateManager", () => ({
   }),
 }));
 vi.mock("../../../RepositoryManager", () => ({ getQueuedPromptsStore: () => queueStore }));
+// The repeat guard also looks for a durable terminal row (questionTerminalResultLookup);
+// these cases start with none stored.
+vi.mock("../../../../database/PGLiteDatabaseWorker", () => ({
+  database: { query: async () => ({ rows: [] }) },
+}));
 vi.mock("../../pendingPromptPersistence", () => ({ setSessionPendingPrompt: async () => {} }));
 vi.mock("../../../SyncManager", () => ({ getSyncProvider: () => undefined }));
 vi.mock("../../../../tray/TrayManager", () => ({
