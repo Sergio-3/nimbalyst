@@ -57,6 +57,22 @@ interface CompoundBashDeps {
 }
 
 /**
+ * Build the pre-approval check for compound sub-commands. Session approvals
+ * live in more than one place: the fallback prompt records them on the
+ * provider, ToolPermissionService records them on itself. Both must count,
+ * or a part approved for the session prompts again on the next command.
+ */
+export function createCompoundPartPreApprovalCheck(
+  getSessionApprovedPatternSets: () => Array<Set<string> | undefined>,
+  settingsChecker: ((workspacePath: string, pattern: string) => Promise<boolean>) | undefined,
+  workspacePath: string | undefined
+): (pattern: string) => Promise<boolean> {
+  return async (pattern) =>
+    getSessionApprovedPatternSets().some(set => set?.has(pattern)) ||
+    (!!workspacePath && !!settingsChecker && await settingsChecker(workspacePath, pattern));
+}
+
+/**
  * Authorize a compound Bash command (&&, ||, ;) one sub-command at a time.
  *
  * This runs from canUseTool, which the SDK calls only after it has combined

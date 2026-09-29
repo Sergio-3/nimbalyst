@@ -1,6 +1,7 @@
+// @vitest-environment node
 import { describe, it, expect, vi } from 'vitest';
-import { authorizeCompoundBashCommand, COMPOUND_PART_WARNING } from '../toolAuthorization';
-import { hasShellChainingOperators, splitOnShellOperators } from '../../../permissions/BashCommandAnalyzer';
+import { authorizeCompoundBashCommand, COMPOUND_PART_WARNING, createCompoundPartPreApprovalCheck } from '../toolAuthorization';
+import { hasShellChainingOperators, splitOnShellOperators, stripHeredocs } from '../../../permissions/BashCommandAnalyzer';
 import { generateToolPattern } from '../../../permissions/toolPermissionHelpers';
 
 describe('splitOnShellOperators', () => {
@@ -31,6 +32,29 @@ describe('splitOnShellOperators', () => {
   it('does not treat semicolons inside a lone heredoc as chaining', () => {
     expect(hasShellChainingOperators("python3 - <<'EOF'\na = 1; b = 2\nEOF")).toBe(false);
   });
+
+  it('re-quotes only words that need it, so parts keep the patterns of the plain commands', () => {
+    const parts = splitOnShellOperators('npx @playwright/test --grep=a:b && FOO=1 npm test && cd ~/src && echo "a b"');
+
+    expect(parts).toEqual(['npx @playwright/test --grep=a:b', 'FOO=1 npm test', 'cd ~/src', "echo 'a b'"]);
+    expect(generateToolPattern('Bash', { command: parts[0] })).toBe(
+      generateToolPattern('Bash', { command: 'npx @playwright/test' })
+    );
+  });
+});
+
+describe('stripHeredocs', () => {
+  it('keeps lines after a << that is inside a comment or quotes', () => {
+    // Neither << starts a heredoc in bash, so the rm line is a real command
+    expect(stripHeredocs('git status && ls # <<A\nrm -rf ~/x\nA')).toContain('rm -rf');
+    expect(stripHeredocs('echo "<<A" && git status\nrm -rf ~/x\nA')).toContain('rm -rf');
+    expect(stripHeredocs("echo '<<A' && git status\nrm -rf ~/x\nA")).toContain('rm -rf');
+    expect(stripHeredocs('echo "$(echo "<<A")" && git status\nrm -rf ~/x\nA')).toContain('rm -rf');
+  });
+
+  it('strips a real heredoc that follows a quoted <<', () => {
+    expect(stripHeredocs('echo "<<A" && cat <<B\nrm -rf ~/x\nB')).toBe('echo "<<A" && cat ');
+  });
 });
 
 describe('authorizeCompoundBashCommand', () => {
@@ -54,6 +78,14 @@ describe('authorizeCompoundBashCommand', () => {
   it('returns null for a multi-line compound command so the whole command is prompted', async () => {
     const d = deps(['Bash(ls:*)']);
     await expect(authorizeCompoundBashCommand(d, { command: 'ls && echo ok\nrm -rf build' })).resolves.toBeNull();
+    expect(d.authorizePart).not.toHaveBeenCalled();
+  });
+
+  it('prompts for the whole command when a comment or quoted << hides a line', async () => {
+    const d = deps(['Bash(git status:*)', 'Bash(ls:*)', 'Bash(echo:*)']);
+
+    await expect(authorizeCompoundBashCommand(d, { command: 'git status && ls # <<A\nrm -rf ~/x\nA' })).resolves.toBeNull();
+    await expect(authorizeCompoundBashCommand(d, { command: 'echo "<<A" && git status\nrm -rf ~/x\nA' })).resolves.toBeNull();
     expect(d.authorizePart).not.toHaveBeenCalled();
   });
 
@@ -81,5 +113,20 @@ describe('authorizeCompoundBashCommand', () => {
 
     expect(result).toEqual({ behavior: 'deny', message: 'Tool call denied by user' });
     expect(d.authorizePart).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('createCompoundPartPreApprovalCheck', () => {
+  it('sees Session approvals held by the permission service as well as the provider', async () => {
+    const providerSet = new Set(['Bash(ls:*)']);
+    const serviceSet = new Set(['Bash(npm test:*)']);
+    const settingsChecker = vi.fn(async (_path: string, pattern: string) => pattern === 'Bash(git status:*)');
+    const isPreApproved = createCompoundPartPreApprovalCheck(() => [providerSet, serviceSet], settingsChecker, '/ws');
+
+    expect(await isPreApproved('Bash(ls:*)')).toBe(true);
+    expect(await isPreApproved('Bash(npm test:*)')).toBe(true);
+    expect(await isPreApproved('Bash(git status:*)')).toBe(true);
+    expect(await isPreApproved('Bash(rm:*)')).toBe(false);
+    expect(settingsChecker).toHaveBeenCalledWith('/ws', 'Bash(rm:*)');
   });
 });

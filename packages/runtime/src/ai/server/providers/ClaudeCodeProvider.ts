@@ -95,6 +95,7 @@ import {
 } from './claudeCode/immediateToolDecision';
 import {
   authorizeCompoundBashCommand,
+  createCompoundPartPreApprovalCheck,
   handleToolPermissionFallback as handleToolPermissionFallbackHelper,
   handleToolPermissionWithService as handleToolPermissionWithServiceHelper,
   type ToolPermissionOptions,
@@ -3239,10 +3240,11 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
         const compoundDecision = !immediateDecision && toolName === 'Bash' && this.currentMode !== 'auto'
           ? await authorizeCompoundBashCommand(
               {
-                isPartPreApproved: async (pattern) =>
-                  this.permissions.sessionApprovedPatterns.has(pattern) ||
-                  (!!workspacePath && !!ClaudeCodeDeps.claudeSettingsPatternChecker &&
-                    await ClaudeCodeDeps.claudeSettingsPatternChecker(workspacePath, pattern)),
+                isPartPreApproved: createCompoundPartPreApprovalCheck(
+                  () => [this.permissions.sessionApprovedPatterns, this.permissionService?.getSessionApprovedPatterns()],
+                  ClaudeCodeDeps.claudeSettingsPatternChecker ?? undefined,
+                  workspacePath
+                ),
                 authorizePart: (partInput, warnings) => promptForTool(toolName, partInput, options, warnings),
                 logSecurity: (message, data) => this.logSecurity(message, data),
               },

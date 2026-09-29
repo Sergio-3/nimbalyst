@@ -100,7 +100,6 @@ describe('AgentToolHooks', () => {
       expect(options.logAgentMessage).not.toHaveBeenCalled();
       expect(getPendingToolPermissions).not.toHaveBeenCalled();
     });
-
   });
 
   describe('Bash pre-tool hook: compound commands defer to the SDK', () => {

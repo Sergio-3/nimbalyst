@@ -65,7 +65,11 @@ export function splitOnShellOperators(command: string): string[] {
           currentTokens.push(token.op);
         }
       } else if (typeof token === 'string') {
-        currentTokens.push(quoteShellArgs([token]));
+        // Quote only words that would otherwise split or read as operators;
+        // quote() also escapes @ = : ~ , which would change the part's pattern
+        currentTokens.push(!/[\s;&|<>()'"`\\$#*?]/.test(token)
+          ? token
+          : token.includes("'") ? quoteShellArgs([token]) : `'${token}'`);
       }
       // Skip other token types (comments, etc.)
     }
@@ -93,16 +97,71 @@ export function splitOnShellOperators(command: string): string[] {
  *
  * This preserves the first line (command + redirect) and only strips the
  * heredoc body (from the line after << DELIMITER to the closing DELIMITER).
+ *
+ * A << inside quotes or a comment is not a heredoc, and the lines after it
+ * are real commands, so it is left alone. Permission checks rely on this:
+ * `git status # <<A` followed by `rm -rf ~` must not hide the rm. After a
+ * command substitution ($( or a backtick) quoting is too hard to follow
+ * here, so nothing more is stripped; callers then see the extra lines.
  */
 export function stripHeredocs(command: string): string {
   // Match: <<[-]? ['"]?WORD['"]? [rest of first line]\n[heredoc body]\nWORD
   // Capture group 1: the delimiter word
   // Capture group 2: the rest of the first line (e.g., "> file.txt")
   // Replace with just the rest of the first line, dropping the heredoc body
-  return command.replace(
-    /<<-?\s*['"]?(\w+)['"]?(.*)\n[\s\S]*?\n\s*\1\s*$/gm,
-    '$2'
-  );
+  const heredoc = /<<-?\s*['"]?(\w+)['"]?(.*)\n[\s\S]*?\n\s*\1\s*$/gm;
+  let quote: '' | "'" | '"' = '';
+  let inComment = false;
+  let escaped = false;
+  let sawSubstitution = false;
+
+  // Track shell quoting state over command[from, to)
+  const lex = (from: number, to: number) => {
+    for (let i = from; i < to; i++) {
+      const ch = command[i];
+      if (inComment) {
+        if (ch === '\n') inComment = false;
+      } else if (escaped) {
+        escaped = false;
+      } else if (quote === "'") {
+        if (ch === "'") quote = '';
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '`' || (ch === '$' && command[i + 1] === '(')) {
+        sawSubstitution = true;
+      } else if (quote === '"') {
+        if (ch === '"') quote = '';
+      } else if (ch === "'" || ch === '"') {
+        quote = ch;
+      } else if (ch === '#' && (i === 0 || /[\s;&|()<>]/.test(command[i - 1]))) {
+        inComment = true;
+      }
+    }
+  };
+
+  let result = '';
+  let copiedTo = 0;
+  let lexedTo = 0;
+  let match: RegExpExecArray | null;
+  while ((match = heredoc.exec(command)) !== null) {
+    lex(lexedTo, match.index);
+    lexedTo = match.index;
+    const isOperator = !quote && !inComment && !escaped && !sawSubstitution &&
+      command[match.index - 1] !== '<' && command[match.index + 2] !== '<';
+    if (!isOperator) {
+      // Not a heredoc; look for another << further on
+      heredoc.lastIndex = match.index + 1;
+      continue;
+    }
+    result += command.slice(copiedTo, match.index) + match[2];
+    // Quoting state carries over from the first line; the body is data
+    const firstLineEnd = command.indexOf('\n', match.index);
+    lex(match.index, firstLineEnd);
+    inComment = false;
+    escaped = false;
+    copiedTo = lexedTo = match.index + match[0].length;
+  }
+  return result + command.slice(copiedTo);
 }
 
 /**

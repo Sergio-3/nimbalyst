@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 <!-- Bug fixes go here -->
+- Compound Bash commands no longer show a permission prompt after your own Claude Code PreToolUse hook has allowed them.
 
 ### Removed
 <!-- Removed features go here -->
