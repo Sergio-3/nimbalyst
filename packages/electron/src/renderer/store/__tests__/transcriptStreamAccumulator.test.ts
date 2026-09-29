@@ -251,10 +251,14 @@ describe('TranscriptStreamAccumulator', () => {
     expect(first.searchableText).toBe(saved);
   });
   it.each([
-    { text: 'yes plus a visible suffix', age: 294 },
-    { text: 'yes', age: 5000 },
-  ])('keeps unmatched enriched streaming input pending: $text/$age', ({ text, age }) => {
-    const h = createHarness([makeDbMessage(-1, 'user_message', 'yes')]);
+    { text: 'yes plus a visible suffix', age: 294, sentAt: 0, acknowledged: false },
+    { text: 'yes', age: 294, sentAt: 1000, acknowledged: false },
+    // #1620: slow turn setup saves the prompt long after send.
+    { text: 'yes', age: 8000, sentAt: 0, acknowledged: true },
+  ])('matches enriched streaming input by text and send order: $text/$age', ({ text, age, sentAt, acknowledged }) => {
+    const h = createHarness([
+      { ...makeDbMessage(-1, 'user_message', 'yes'), createdAt: new Date(sentAt) },
+    ]);
     const saved = text + '\n<NIMBALYST_SYSTEM_MESSAGE>Document context</NIMBALYST_SYSTEM_MESSAGE>';
     h.acc.apply({
       ...makeUserEvent(10, saved, 0),
@@ -262,7 +266,7 @@ describe('TranscriptStreamAccumulator', () => {
       createdAt: new Date(age),
     });
     h.tickFrame();
-    expect(h.lastEmit!.messages.map((m) => m.id)).toEqual([10, -1]);
+    expect(h.lastEmit!.messages.map((m) => m.id)).toEqual(acknowledged ? [10] : [10, -1]);
     expect(h.lastEmit!.messages[0].text).toBe(saved);
   });
 

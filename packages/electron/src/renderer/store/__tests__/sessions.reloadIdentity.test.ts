@@ -183,18 +183,31 @@ describe('canonical generation load/reload reconciliation', () => {
         acknowledged: false,
       },
       {
-        variant: 'five-second boundary',
+        // #1620: slow turn setup saves the prompt long after send.
+        variant: 'saved long after send',
         saved: 'Repeat request\n<NIMBALYST_SYSTEM_MESSAGE>Context</NIMBALYST_SYSTEM_MESSAGE>',
         optimistic: 'Repeat request',
-        age: 5000,
+        age: 8000,
+        acknowledged: true,
+      },
+      {
+        variant: 'saved before send',
+        saved: 'Repeat request',
+        optimistic: 'Repeat request',
+        age: 294,
+        sentAt: 1000,
         acknowledged: false,
       },
     ])(
       `${name} acknowledges context-normalized input: $variant`,
-      async ({ variant, saved, optimistic, age, acknowledged }) => {
+      async ({ variant, saved, optimistic, age, sentAt = 0, acknowledged }) => {
         const store = createStore();
         const id = `optimistic-context-${name}-${variant}`;
-        const pendingInput = { ...makeMessage(-4, optimistic), type: 'user_message' as const };
+        const pendingInput = {
+          ...makeMessage(-4, optimistic),
+          type: 'user_message' as const,
+          createdAt: new Date(sentAt),
+        };
         const canonical = {
           ...message(7369, 241, 99, saved),
           type: 'user_message' as const,
