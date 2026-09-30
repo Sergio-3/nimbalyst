@@ -6,6 +6,7 @@ import {
   activeWorkspacePathAtom,
   openProjectsAtom,
 } from '../../atoms/openProjects';
+import { initAgentModeLayout } from '../../atoms/agentMode';
 import { selectedWorkstreamAtom } from '../../atoms/sessions';
 import { initWorkstreamState } from '../../atoms/workstreamState';
 import { initTrayListeners } from '../trayListeners';
@@ -21,7 +22,10 @@ function openProject(path: string) {
  * Minimal main process: each project owns a disjoint set of sessions, and
  * every other invoke succeeds with an empty payload.
  */
-function installWindow(sessionsByProject: Record<string, string[]>) {
+function installWindow(
+  sessionsByProject: Record<string, string[]>,
+  getState: (workspacePath: string) => Promise<unknown> = async () => ({}),
+) {
   const listeners = new Map<string, (data: unknown) => unknown>();
   const invoke = vi.fn(async (channel: string, ...args: unknown[]) => {
     if (channel === 'sessions:list') {
@@ -31,6 +35,7 @@ function installWindow(sessionsByProject: Record<string, string[]>) {
         sessions: ids.map((id) => ({ id, title: id, createdAt: 0, updatedAt: 0 })),
       };
     }
+    if (channel === 'workspace:get-state') return getState(args[0] as string);
     return { success: true };
   });
 
@@ -94,5 +99,42 @@ describe('tray:navigate-to-session', () => {
 
     expect(store.get(activeWorkspacePathAtom)).toBe(PROJECT_B);
     expect(store.get(selectedWorkstreamAtom(PROJECT_B))).toEqual({ type: 'session', id: 'session-b' });
+  });
+
+  it('keeps the clicked session open when the rail switch restores the project late', async () => {
+    // Project-A was open before with session-a-old, and that is what its
+    // persisted state still says. The rail switch restores it asynchronously
+    // (App.tsx and AgentMode both call initAgentModeLayout on the new path);
+    // when that restore answers after the click selected session-a, the main
+    // view showed session-a-old while the list already marked session-a.
+    store.set(selectedWorkstreamAtom(PROJECT_A), { type: 'session', id: 'session-a-old' });
+    let answerRestore: () => void = () => {};
+    const persisted = new Promise((resolve) => {
+      answerRestore = () => resolve({
+        agenticCodingWindowState: { selectedWorkstream: { type: 'session', id: 'session-a-old' } },
+      });
+    });
+    const { navigate } = installWindow(
+      { [PROJECT_A]: ['session-a', 'session-a-old'], [PROJECT_B]: [] },
+      (workspacePath) => (workspacePath === PROJECT_A ? persisted : Promise.resolve({})),
+    );
+    cleanup = initTrayListeners();
+    const restores: Promise<void>[] = [];
+    const stopRailEffect = store.sub(activeWorkspacePathAtom, () => {
+      restores.push(initAgentModeLayout(store.get(activeWorkspacePathAtom)!));
+    });
+
+    try {
+      await navigate({ sessionId: 'session-a', workspacePath: PROJECT_A });
+      expect(store.get(selectedWorkstreamAtom(PROJECT_A))).toEqual({ type: 'session', id: 'session-a' });
+
+      answerRestore();
+      await Promise.all(restores);
+
+      expect(restores.length).toBeGreaterThan(0);
+      expect(store.get(selectedWorkstreamAtom(PROJECT_A))).toEqual({ type: 'session', id: 'session-a' });
+    } finally {
+      stopRailEffect();
+    }
   });
 });
