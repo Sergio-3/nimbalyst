@@ -121,8 +121,10 @@ export class OpenAICodexProvider extends BaseAgentProvider {
     contextWindow: number;
     maxTokens: number;
   }> = [
-    // GPT-6 catalog entries require codex >= 0.153.0 (Astra) and >= 0.155.0
-    // (Sol, Luna); the catalog lists a 272k default context window for all three.
+    // GPT-6 catalog entries require codex >= 0.153.0 (Astra), >= 0.155.0
+    // (Sol, Luna), and >= 0.159.1 (6.1 Sol); the catalog lists a 272k default
+    // context window for all of them.
+    { id: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', contextWindow: 272000, maxTokens: 128000 },
     { id: 'gpt-6-sol', name: 'GPT-6 Sol', contextWindow: 272000, maxTokens: 128000 },
     { id: 'gpt-6-astra', name: 'GPT-6 Astra', contextWindow: 272000, maxTokens: 128000 },
     { id: 'gpt-6-luna', name: 'GPT-6 Luna', contextWindow: 272000, maxTokens: 128000 },
@@ -134,6 +136,7 @@ export class OpenAICodexProvider extends BaseAgentProvider {
     { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', contextWindow: 400000, maxTokens: 128000 },
   ];
   private static readonly MODEL_FALLBACK_PRIORITY: ReadonlyArray<string> = [
+    'gpt-6.1-sol',
     'gpt-6-sol',
     'gpt-6-luna',
     'gpt-5.6-sol',
@@ -1924,7 +1927,7 @@ export class OpenAICodexProvider extends BaseAgentProvider {
     const resolved = parsed ? parsed.model : configured.replace(/^openai-codex:/, '');
     const normalized = resolved.toLowerCase();
     if (normalized === 'openai-codex-cli' || normalized === 'default' || normalized === 'cli') {
-      return 'gpt-6-sol';
+      return 'gpt-6.1-sol';
     }
 
     // Pass the model directly to the Codex SDK without pre-validation.
