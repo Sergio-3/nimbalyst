@@ -78,7 +78,9 @@ describe('pending question navigation', () => {
   it.each(['AskUserQuestion', 'mcp__nimbalyst__PromptForUserInput', 'RequestUserInput'])(
     'reveals %s inside its grouped row once and stays reachable after later output', toolName => {
       const messages = [makeMessage(0, { text: 'Before' }), question(1, toolName), makeMessage(2, { text: 'After' })];
-      const { rerender, container } = render(view(messages));
+      const { rerender, container } = render(view(messages.slice(0, 1)));
+      flushFrames();
+      rerender(view(messages));
       const card = container.querySelector<HTMLElement>('[data-transcript-tool-id="question-1"]')!;
       vi.spyOn(card, 'getBoundingClientRect').mockReturnValue({ top: 180 } as DOMRect);
       flushFrames();
@@ -100,28 +102,33 @@ describe('pending question navigation', () => {
   );
 
   it('handles orphan regrouping, a second question, and session switches without replaying old arrivals', () => {
-    const { rerender } = render(view([question(0)]));
+    const prompt = makeMessage(0, { type: 'user_message', text: 'Go' });
+    const { rerender } = render(view([prompt]));
     flushFrames();
-    expect(vlistState.scrollToIndex).toHaveBeenLastCalledWith(0, { align: 'start' });
+    rerender(view([prompt, question(1)]));
+    flushFrames();
+    expect(vlistState.scrollToIndex).toHaveBeenLastCalledWith(1, { align: 'start' });
     vlistState.scrollToIndex.mockClear();
-    const messages = [question(0), makeMessage(1, { text: 'Continuation' })];
+    const messages = [prompt, question(1), makeMessage(2, { text: 'Continuation' })];
     rerender(view(messages));
     flushFrames();
     expect(vlistState.scrollToIndex).not.toHaveBeenCalled();
     fireEvent.click(screen.getByLabelText('Jump to question'));
     flushFrames();
-    expect(vlistState.scrollToIndex).toHaveBeenLastCalledWith(1, { align: 'start' });
-
-    rerender(view([...messages, question(2)]));
-    flushFrames();
     expect(vlistState.scrollToIndex).toHaveBeenLastCalledWith(2, { align: 'start' });
+
+    rerender(view([...messages, question(3)]));
+    flushFrames();
+    expect(vlistState.scrollToIndex).toHaveBeenLastCalledWith(3, { align: 'start' });
     fireEvent.click(screen.getByLabelText('Jump to question'));
     flushFrames();
-    expect(vlistState.scrollToIndex).toHaveBeenLastCalledWith(1, { align: 'start' });
+    expect(vlistState.scrollToIndex).toHaveBeenLastCalledWith(2, { align: 'start' });
 
-    rerender(view([question(0)], 'other-session'));
+    // Questions already open when a session is shown count as seen.
+    vlistState.scrollToIndex.mockClear();
+    rerender(view([prompt, question(1)], 'other-session'));
     flushFrames();
-    expect(vlistState.scrollToIndex).toHaveBeenLastCalledWith(0, { align: 'start' });
+    expect(vlistState.scrollToIndex).not.toHaveBeenCalledWith(expect.any(Number), { align: 'start' });
   });
 
   it('ignores superseded answers and non-question prompts', () => {
