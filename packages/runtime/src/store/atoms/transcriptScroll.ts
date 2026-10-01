@@ -9,6 +9,7 @@
 import { atom } from 'jotai';
 import { atomFamily } from 'jotai-family';
 import { store } from '../store';
+import type { TranscriptReturnState } from '../../ui/AgentTranscript/utils/transcriptReturnTarget';
 
 /**
  * Per-session flag tracking if user is at the bottom of the transcript.
@@ -35,8 +36,25 @@ export function getSessionIsAtBottom(sessionId: string): boolean {
 }
 
 /**
+ * Per-session position remembered when the transcript is left, used to pick
+ * where it reopens. In memory only; undefined until the session was shown.
+ */
+export const sessionReturnStateAtom = atomFamily((_sessionId: string) =>
+  atom<TranscriptReturnState | undefined>(undefined)
+);
+
+export function setSessionReturnState(sessionId: string, state: TranscriptReturnState): void {
+  store.set(sessionReturnStateAtom(sessionId), state);
+}
+
+export function getSessionReturnState(sessionId: string): TranscriptReturnState | undefined {
+  return store.get(sessionReturnStateAtom(sessionId));
+}
+
+/**
  * Cleanup atom for a session (call when session is deleted).
  */
 export function cleanupSessionScrollState(sessionId: string): void {
   sessionIsAtBottomAtom.remove(sessionId);
+  sessionReturnStateAtom.remove(sessionId);
 }
