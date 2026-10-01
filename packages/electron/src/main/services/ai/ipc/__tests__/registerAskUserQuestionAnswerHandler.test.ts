@@ -76,7 +76,11 @@ import { clearTerminalizedAskUserQuestions } from "../../askUserQuestionFallback
 import { codexQuestionRecoveryId } from "../../codexQuestionDelivery";
 
 const SESSION = "session-running";
-const QUESTION = "toolu_question";
+// Each case asks its own question: the answer reservation (upstream
+// PromptAnswerReservation) is durable for the test module's profile, so a
+// shared id would arrive already delivered in every case after the first.
+let questionCount = 0;
+let QUESTION = "toolu_question";
 
 const answer = () =>
   mocks.handlers.get("claude-code:answer-question")!(
@@ -91,6 +95,7 @@ beforeEach(() => {
   mocks.queue.clear();
   mocks.session = { provider: "claude-code", workspacePath: "/workspace" };
   vi.clearAllMocks();
+  QUESTION = `toolu_question_${++questionCount}`;
   clearTerminalizedAskUserQuestions(SESSION);
   registerInteractivePromptHandlers({
     driveQueuedPrompts: mocks.drive,

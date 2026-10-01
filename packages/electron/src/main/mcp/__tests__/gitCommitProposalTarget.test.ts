@@ -30,6 +30,7 @@ vi.mock('../../services/ai/claudeCliUserPromptLog', () => ({}));
 vi.mock('../../services/ClaudeSettingsManager', () => ({}));
 vi.mock('../../services/PermissionService', () => ({}));
 vi.mock('../../services/SessionCommitService', () => ({}));
+vi.mock('../../services/ai/requestUserInputResumption', () => ({}));
 
 import { handleGitCommitProposal } from '../tools/interactiveToolHandlers';
 

@@ -24,8 +24,17 @@ vi.mock('electron', async () => ({
 vi.mock('../../utils/ipcRegistry', () => ({
   safeHandle: (name: string, fn: any) => mocks.handlers.set(name, fn),
 }));
+// The handler identifies the answered proposal exactly (upstream d5e3ec184):
+// the stored proposal row must exist, or the answer is refused before the
+// waiter check this test is about.
 vi.mock('../../database/PGLiteDatabaseWorker', () => ({
-  database: { query: async () => ({ rows: [] }) },
+  database: {
+    query: async (sql: string) => ({
+      rows: sql.includes('"type":"git_commit_proposal"%')
+        ? [{ content: JSON.stringify({ type: 'git_commit_proposal', proposalId: 'toolu_commit' }), created_at: new Date('2026-09-24T11:59:00Z') }]
+        : [],
+    }),
+  },
 }));
 vi.mock('@nimbalyst/runtime/storage/repositories/AISessionsRepository', () => ({
   AISessionsRepository: { get: async () => ({ provider: 'claude-code' }) },
