@@ -31,7 +31,7 @@ export function usePendingQuestionNavigation({ messages, sessionId, ready, vlist
   scrollContainerRef: RefObject<HTMLDivElement | null>;
 }) {
   const pendingQuestions = useMemo(() => findPendingQuestions(messages), [messages]);
-  const navigationRef = useRef<{ sessionId: string; seen: Set<string> }>({ sessionId, seen: new Set() });
+  const navigationRef = useRef<{ sessionId: string; seen: Set<string>; shown: boolean }>({ sessionId, seen: new Set(), shown: false });
   const frameRef = useRef<number | null>(null);
   const latestRef = useRef({ sessionId, pendingQuestions });
   latestRef.current = { sessionId, pendingQuestions };
@@ -68,16 +68,21 @@ export function usePendingQuestionNavigation({ messages, sessionId, ready, vlist
 
   useEffect(() => {
     if (navigationRef.current.sessionId !== sessionId) {
-      navigationRef.current = { sessionId, seen: new Set() };
+      navigationRef.current = { sessionId, seen: new Set(), shown: false };
     }
     if (!ready) {
       cancelJump();
       navigationRef.current.seen.clear();
+      navigationRef.current.shown = false;
       return;
     }
     const unseen = pendingQuestions.filter(question => !navigationRef.current.seen.has(question.id));
-    if (unseen.length === 0) return;
     unseen.forEach(question => navigationRef.current.seen.add(question.id));
+    // Questions already open when the transcript is shown count as seen; only
+    // ones arriving while it is on screen pull the view to them.
+    const arrivedWhileShown = navigationRef.current.shown;
+    navigationRef.current.shown = true;
+    if (unseen.length === 0 || !arrivedWhileShown) return;
     jumpToQuestion(unseen[0]);
   }, [pendingQuestions, ready, sessionId, jumpToQuestion, cancelJump]);
 

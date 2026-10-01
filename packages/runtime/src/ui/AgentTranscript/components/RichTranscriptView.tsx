@@ -20,7 +20,8 @@ import { isToolLikeMessage } from '../utils/messageTypeHelpers';
 import { getCustomToolWidget, ToolWidgetErrorBoundary, type ToolCallDiffResult } from './CustomToolWidgets';
 import { useTranscriptToolWidgetRegistryVersion } from '../contributions';
 import { ToolCallChanges } from './ToolCallChanges';
-import { setSessionIsAtBottom, getSessionIsAtBottom } from '../../../store/atoms/transcriptScroll';
+import { setSessionIsAtBottom, getSessionIsAtBottom, getSessionReturnState, setSessionReturnState } from '../../../store/atoms/transcriptScroll';
+import { decideTranscriptReturnTarget, lastTranscriptSequence, type TranscriptReturnState } from '../utils/transcriptReturnTarget';
 import { isAppleMobileWebKit } from '../../../utils/platform';
 import { usePendingPermissionNavigation } from './usePendingPermissionNavigation';
 import { usePendingQuestionNavigation } from './usePendingQuestionNavigation';
@@ -1462,34 +1463,62 @@ export const RichTranscriptView = React.forwardRef<
     }
   }), []);
 
-  // Reset scroll-ready state when session changes or container hides
+  const hasMessages = messages.length > 0;
+  const latestMessagesRef = useRef(messages);
+  latestMessagesRef.current = messages;
+  // Top visible row while shown; written by onScroll, saved on leave.
+  const anchorRef = useRef<TranscriptReturnState['anchor']>(null);
+
+  // Reset scroll-ready state when session changes, container hides, or the
+  // first messages arrive (the restore below then runs behind opacity:0).
   useEffect(() => {
     setIsScrollReady(false);
-  }, [sessionId, isContainerVisible]);
+  }, [sessionId, isContainerVisible, hasMessages]);
 
-  // Initialize scroll to bottom when session loads or container becomes visible
+  // Place the view when the session is shown: first new message since the
+  // last visit, else bottom if it was left there, else the remembered row.
   useEffect(() => {
     if (!isContainerVisible) return;
 
-    if (messages.length === 0) {
+    if (!hasMessages) {
       // Empty session is ready immediately
       setIsScrollReady(true);
       return;
     }
 
+    const saved = persistScrollState ? getSessionReturnState(sessionId) : undefined;
+    anchorRef.current = saved?.anchor ?? null;
+    const target = decideTranscriptReturnTarget(messages, saved);
+    // Keep the bottom-follow effect below from overriding the restore.
+    if (target.kind !== 'bottom') setAtBottomState(false);
+
     // Single RAF: wrapper is opacity:0 until scroll-ready, so intermediate state is invisible.
     // With itemSize hint + cache, VList can estimate scroll position accurately on first try.
     let frame: number;
     frame = requestAnimationFrame(() => {
-      if (pendingQuestions.length === 0) {
+      if (target.kind === 'bottom') {
         vlistRef.current?.scrollToIndex(messages.length - 1, { align: 'end' });
+      } else if (target.kind === 'news') {
+        vlistRef.current?.scrollToIndex(target.index, { align: 'start' });
+      } else {
+        vlistRef.current?.scrollToIndex(target.index, { align: 'start', offset: target.offset });
       }
       frame = requestAnimationFrame(() => {
         setIsScrollReady(true);
       });
     });
     return () => cancelAnimationFrame(frame);
-  }, [sessionId, isContainerVisible]); // Re-run when session changes or container becomes visible
+  }, [sessionId, isContainerVisible, hasMessages]); // Re-run when session changes or container becomes visible
+
+  // Remember the position and the last message when the transcript is left.
+  useEffect(() => {
+    if (!persistScrollState || !isContainerVisible || !isScrollReady) return;
+    return () => {
+      const lastSequence = lastTranscriptSequence(latestMessagesRef.current);
+      if (lastSequence === null) return;
+      setSessionReturnState(sessionId, { lastSequence, anchor: anchorRef.current, atBottom: isAtBottomRef.current });
+    };
+  }, [persistScrollState, isContainerVisible, isScrollReady, sessionId]);
 
   // Auto-scroll to bottom when messages change (if user was at bottom)
   useEffect(() => {
@@ -2477,6 +2506,13 @@ export const RichTranscriptView = React.forwardRef<
                       const isAtBottom = isTranscriptAtBottom(distanceFromBottom);
                       // Update the per-session atom - this persists across component remounts
                       setAtBottomState(isAtBottom);
+                      if (persistScrollState) {
+                        const topIndex = vlistRef.current.findItemIndex(offset);
+                        const topMessage = messages[topIndex];
+                        anchorRef.current = topMessage && topMessage.sequence >= 0
+                          ? { sequence: topMessage.sequence, offset: offset - vlistRef.current.getItemOffset(topIndex) }
+                          : null;
+                      }
                       if (scrollButtonRef.current) {
                         const show = distanceFromBottom > viewportSize;
                         scrollButtonRef.current.style.opacity = show ? '1' : '0';
