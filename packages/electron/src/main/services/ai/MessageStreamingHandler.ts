@@ -1170,7 +1170,18 @@ export class MessageStreamingHandler {
             // Fire-and-forget: sendMessage will stream results to the renderer
             setImmediate(async () => {
               try {
-                await this.svc.sendMessageHandler!(mockEvent, data.message, {} as any, data.sessionId, effectiveWorkspacePath);
+                // The app wakes the lead here (background task settled, teammate
+                // message, stream recovery), not the user. Without provenance the
+                // send would be stored as a human composer prompt, and the
+                // transcript would treat it as the user moving past every open
+                // question (NIM-7240).
+                await this.svc.sendMessageHandler!(
+                  mockEvent,
+                  data.message,
+                  { promptProvenance: { actor: 'system', origin: 'automation' } } as any,
+                  data.sessionId,
+                  effectiveWorkspacePath,
+                );
               } catch (err) {
                 logger.main.error('[AIService] Failed to process teammate message while idle:', err);
               }

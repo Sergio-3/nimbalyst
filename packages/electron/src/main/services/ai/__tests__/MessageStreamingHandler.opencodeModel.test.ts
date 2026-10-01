@@ -212,6 +212,9 @@ import { logger } from '../../../utils/logger';
 import { resolveClaudeCodeParentContextWindow } from '@nimbalyst/runtime/ai/modelConstants';
 import { resetPushOutcomeWarnings } from '@nimbalyst/runtime/sync/pushOutcome';
 import { buildResumeMessage, notePromptTurnEnded } from "../requestUserInputResumption";
+import { findWindowByWorkspace } from "../../../window/WindowManager";
+import { partitionUnansweredQuestions } from "@nimbalyst/runtime/ai/server/interactivePromptTools";
+import { stampPromptSource } from "@nimbalyst/runtime/ai/server/transcript/processDescriptor";
 
 /**
  * OpenCode replaces its whole config on every `initialize`, which is how the
@@ -261,6 +264,7 @@ async function runTurn(options: {
   provider: RecordingProvider;
   sessionManager?: Record<string, unknown>;
   documentContext?: Record<string, unknown>;
+  sendMessageHandler?: (...args: any[]) => Promise<unknown>;
 }) {
   mocks.providerFactory.createProvider.mockReturnValue(options.provider);
 
@@ -271,7 +275,7 @@ async function runTurn(options: {
       ...options.sessionManager,
     },
     analytics: { sendEvent: vi.fn() },
-    sendMessageHandler: null,
+    sendMessageHandler: options.sendMessageHandler ?? null,
     processingQueuedPromptIds: new Set(),
     matchDebounceTimers: new Map(),
     sessionsProcessingQueue: new Set(),
@@ -555,6 +559,69 @@ describe("MessageStreamingHandler resume turn of an answered form", () => {
       expect(JSON.parse(result.result).answers).toEqual(answers);
     } finally {
       AgentMessagesRepository.clearStore();
+    }
+  });
+});
+
+// A finished background task or teammate wakes the idle lead with a system
+// message. It is not the user moving on, so a question still waiting for an
+// answer must stay open after it. The wake turn's document context decides how
+// its input row is labelled, and the transcript reads that label.
+describe("MessageStreamingHandler wake turn after background work", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.providerFactory.getProvider.mockReturnValue(null);
+  });
+
+  it("leaves an open question open when only a wake message follows it", async () => {
+    mocks.stateManager.isSessionActive.mockReturnValue(true);
+    vi.mocked(findWindowByWorkspace).mockReturnValue({
+      isDestroyed: () => false,
+      webContents: { mainFrame: {} },
+    } as never);
+    const wakeSends: Array<Record<string, unknown> | undefined> = [];
+    const sendMessageHandler = vi.fn(async (_event: unknown, _message: string, context?: Record<string, unknown>) => {
+      wakeSends.push(context);
+    });
+    try {
+      // The lead's turn ends while a background task runs; the task settles
+      // later and the provider wakes the idle lead.
+      const lead = new RecordingProvider();
+      lead.sendMessage = async function* () {
+        lead.emit("teammate:messageWhileIdle", {
+          sessionId: "wake-session",
+          message: "[System: background task(s) you launched have settled: done]",
+        });
+      };
+      await runTurn({ session: openCodeSession({ id: "wake-session" }), provider: lead, sendMessageHandler });
+      await vi.waitFor(() => expect(sendMessageHandler).toHaveBeenCalledTimes(1));
+
+      // Run the wake turn with the context it was sent with and record what
+      // the provider logs its input row with.
+      let wakeTurnContext: Record<string, unknown> | undefined;
+      const wakeTurn = new RecordingProvider();
+      wakeTurn.sendMessage = async function* (_message: string, context?: Record<string, unknown>) {
+        wakeTurnContext = context;
+      } as never;
+      await runTurn({ session: openCodeSession({ id: "wake-session" }), provider: wakeTurn, documentContext: wakeSends[0] });
+
+      const wakeRow = stampPromptSource(
+        { type: "user_message", text: "[System: background task(s) you launched have settled: done]" } as never,
+        {
+          metadata: {
+            ...(wakeTurnContext?.promptProvenance ? { promptProvenance: wakeTurnContext.promptProvenance } : {}),
+            ...(wakeTurnContext?.promptOrigin ? { promptOrigin: wakeTurnContext.promptOrigin } : {}),
+          },
+        } as never,
+      ) as never;
+      const question = { type: "tool_call", toolCall: { toolName: "mcp__nimbalyst__PromptForUserInput", providerToolCallId: "toolu_open" } };
+      const { open, superseded } = partitionUnansweredQuestions([{ type: "user_message" }, question, wakeRow]);
+
+      expect(superseded).toEqual([]);
+      expect(open.map((q) => q.id)).toEqual(["toolu_open"]);
+    } finally {
+      mocks.stateManager.isSessionActive.mockReturnValue(false);
+      vi.mocked(findWindowByWorkspace).mockReturnValue(null as never);
     }
   });
 });
