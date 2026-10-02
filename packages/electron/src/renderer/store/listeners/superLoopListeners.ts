@@ -21,6 +21,14 @@ import type { SuperLoopEvent } from '../../../shared/types/superLoop';
 const MAX_PROGRESS_REMINDERS = 2;
 
 /**
+ * The loop sends its iteration prompts and reminders, not the user. Without
+ * provenance ai:sendMessage stores them as human composer prompts, and the
+ * transcript treats each one as the user moving past every open question
+ * (NIM-7240).
+ */
+const LOOP_SEND_CONTEXT = { promptProvenance: { actor: 'system', origin: 'automation' } } as const;
+
+/**
  * Initialize Super Loop IPC listeners.
  * Should be called once at app startup.
  *
@@ -122,7 +130,7 @@ export function initSuperLoopListeners(): () => void {
         await window.electronAPI.invoke(
           'ai:sendMessage',
           data.prompt,
-          undefined, // No document context
+          LOOP_SEND_CONTEXT,
           data.sessionId,
           data.workspaceId
         );
@@ -158,7 +166,7 @@ export function initSuperLoopListeners(): () => void {
           await window.electronAPI.invoke(
             'ai:sendMessage',
             'You have not yet called the `super_loop_progress_update` tool. You MUST call this tool before your turn ends to record your progress for the next iteration. Call it now with your progress update.',
-            undefined,
+            LOOP_SEND_CONTEXT,
             data.sessionId,
             data.workspaceId
           );

@@ -209,6 +209,11 @@ vi.mock("../requestUserInputResumption", async (importOriginal) => ({
   notePromptTurnEnded: vi.fn(),
 }));
 
+// The Super Loop listener writes loop state into the renderer store; only its
+// sends are under test.
+vi.mock("../../../../renderer/store/index", () => ({ store: { set: vi.fn() } }));
+vi.mock("../../../../renderer/store/atoms/superLoop", () => ({ processSuperEventAtom: {} }));
+
 import { AgentMessagesRepository } from "@nimbalyst/runtime/storage/repositories/AgentMessagesRepository";
 import { MessageStreamingHandler } from "../MessageStreamingHandler";
 import { logger } from '../../../utils/logger';
@@ -218,6 +223,10 @@ import { buildResumeMessage, notePromptTurnEnded } from "../requestUserInputResu
 import { findWindowByWorkspace } from "../../../window/WindowManager";
 import { partitionUnansweredQuestions } from "@nimbalyst/runtime/ai/server/interactivePromptTools";
 import { stampPromptSource } from "@nimbalyst/runtime/ai/server/transcript/processDescriptor";
+import { BaseAIProvider } from "@nimbalyst/runtime/ai/server/AIProvider";
+import { dispatchClaimedQueuedPrompt, SessionProcessingGuard } from "../queuedPromptDispatcher";
+import { buildRestartContinuationPrompt } from "../../../mcp/restartContinuationPrompt";
+import { initSuperLoopListeners } from "../../../../renderer/store/listeners/superLoopListeners";
 
 /**
  * OpenCode replaces its whole config on every `initialize`, which is how the
@@ -649,6 +658,118 @@ describe("MessageStreamingHandler wake turn after background work", () => {
     } finally {
       mocks.stateManager.isSessionActive.mockReturnValue(false);
       vi.mocked(findWindowByWorkspace).mockReturnValue(null as never);
+    }
+  });
+});
+
+/**
+ * Runs the turn a send starts with `documentContext` and returns its input row
+ * the way the transcript reads it: the provider's own helper turns the context
+ * the turn received into the row's metadata, `stampPromptSource` reads it back.
+ */
+async function storedInputRow(sessionId: string, text: string, documentContext: Record<string, unknown> | undefined) {
+  let turnContext: Record<string, unknown> | undefined;
+  const turn = new RecordingProvider();
+  turn.sendMessage = async function* (_message: string, context?: Record<string, unknown>) {
+    turnContext = context;
+  } as never;
+  await runTurn({ session: openCodeSession({ id: sessionId }), provider: turn, documentContext });
+  const metadata = (BaseAIProvider.prototype as any).withPromptProvenanceMetadata.call({}, turnContext);
+  return stampPromptSource({ type: "user_message", text } as never, { metadata } as never) as never;
+}
+
+/** Who `row` is stored as, and which question asked before it the transcript still offers to answer. */
+function questionAfter(row: never) {
+  const question = { type: "tool_call", toolCall: { toolName: "mcp__nimbalyst__PromptForUserInput", providerToolCallId: "toolu_open" } };
+  const { open, superseded } = partitionUnansweredQuestions([{ type: "user_message" }, question, row]);
+  return {
+    actor: (row as { promptActor?: string }).promptActor,
+    open: open.map((q) => q.id),
+    superseded: superseded.map((q) => q.id),
+  };
+}
+
+const STAYS_OPEN = { actor: "system", open: ["toolu_open"], superseded: [] };
+
+// The app, not the user, sends these. Each must leave a question that was
+// waiting for an answer open, like the wake message above.
+describe("MessageStreamingHandler automatic sends after an open question", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.providerFactory.getProvider.mockReturnValue(null);
+  });
+
+  it("leaves it open after the continuation that resumes a session after an app restart", async () => {
+    const queued = buildRestartContinuationPrompt("restart-session", 1);
+    const sent: Array<Record<string, unknown> | undefined> = [];
+    await dispatchClaimedQueuedPrompt({
+      claimed: queued,
+      continueQueuedPromptChain: vi.fn(async () => {}),
+      logError: vi.fn(),
+      onPromptClaimed: vi.fn(),
+      processingSet: new SessionProcessingGuard(),
+      queueStore: { listPending: vi.fn(), claim: vi.fn(), complete: vi.fn(async () => {}), fail: vi.fn(async () => {}) },
+      sendMessageHandler: vi.fn(async (_event, _message, context) => {
+        sent.push(context as Record<string, unknown> | undefined);
+        return { content: "" };
+      }),
+      sessionId: queued.sessionId,
+      source: "restart-continuation",
+      startSession: vi.fn(async () => {}),
+      targetWindow: { webContents: { mainFrame: {} } } as never,
+      workspacePath: "/workspace",
+    });
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+    const row = await storedInputRow(queued.sessionId, queued.prompt, sent[0]);
+
+    expect(questionAfter(row)).toEqual(STAYS_OPEN);
+  });
+
+  it("leaves it open after a Super Loop iteration prompt and its progress reminder", async () => {
+    const listeners = new Map<string, (data: any) => unknown>();
+    const sent: Array<{ message: string; context: Record<string, unknown> | undefined }> = [];
+    let progressChecks = 0;
+    const completed = vi.fn();
+    (globalThis as any).window = {
+      electronAPI: {
+        on: vi.fn((channel: string, handler: (data: any) => unknown) => {
+          listeners.set(channel, handler);
+          return () => listeners.delete(channel);
+        }),
+        invoke: vi.fn(async (channel: string, ...args: any[]) => {
+          if (channel === "ai:sendMessage") {
+            sent.push({ message: args[0], context: args[1] });
+            setImmediate(() => listeners.get("ai:streamResponse")?.({ sessionId: args[2], isComplete: true }));
+            return undefined;
+          }
+          // The first iteration forgets the progress tool, so the loop reminds it once.
+          if (channel === "super-loop:was-progress-tool-called") return { called: ++progressChecks > 1 };
+          return undefined;
+        }),
+        send: completed,
+      },
+    };
+    const cleanup = initSuperLoopListeners();
+    try {
+      await listeners.get("super-loop:iteration-prompt")!({
+        superLoopId: "loop-1",
+        sessionId: "loop-session",
+        prompt: "Iteration 1: continue the plan",
+        worktreePath: "/workspace",
+        workspaceId: "/workspace",
+      });
+      expect(completed).toHaveBeenCalledWith("super-loop:session-complete", "loop-session", true);
+      expect(sent).toHaveLength(2);
+
+      const outcomes = [];
+      for (const { message, context } of sent) {
+        outcomes.push(questionAfter(await storedInputRow("loop-session", message, context)));
+      }
+      expect(outcomes).toEqual([STAYS_OPEN, STAYS_OPEN]);
+    } finally {
+      cleanup();
+      delete (globalThis as any).window;
     }
   });
 });
