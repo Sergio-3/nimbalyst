@@ -1,11 +1,13 @@
 // @vitest-environment node
 import { createStore } from 'jotai';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { SessionMeta } from '@nimbalyst/runtime';
 import {
   agentBubbleStateAtom,
   agentSessionAttentionAtom,
   hasUnansweredInteractivePrompt,
+  refreshPendingPromptsAtom,
+  respondToPromptAtom,
   sessionHasPendingInteractivePromptAtom,
   sessionListWorkspaceAtom,
   sessionProcessingAtom,
@@ -13,6 +15,7 @@ import {
   sessionStoreAtom,
   sessionUnreadAtom,
 } from '../sessions';
+import { createRequestUserInputHostActions } from '../../../components/UnifiedAI/promptResponseOutcome';
 
 const WORKSPACE = '/workspace/current';
 
@@ -214,5 +217,64 @@ describe('agentSessionAttentionAtom: sub-agent drain counts as running', () => {
     const groups = store.get(agentSessionAttentionAtom);
     expect(groups.running).toEqual([]);
     expect(groups.unread.map((item) => item.id)).toEqual(['done-draining']);
+  });
+});
+
+// The answer's broadcast clears the flag before the answering invoke returns;
+// the refresh after it reads messages in which the answered call has no result
+// yet. Counting that call again pinned the "?" on the open session until the
+// user switched sessions and back.
+describe('pending-prompt refresh after an answer', () => {
+  const SESSION = 'answered';
+  const form = (id: string) => ({
+    type: 'tool_call',
+    toolCall: { toolName: 'mcp__nimbalyst__PromptForUserInput', providerToolCallId: id },
+  });
+  const permission = (requestId: string) => ({
+    type: 'tool_call',
+    toolCall: { toolName: 'ToolPermission', providerToolCallId: `tool-${requestId}`, arguments: { requestId } },
+  });
+
+  function clearedByBroadcast(messages: unknown[]) {
+    const store = createStore();
+    store.set(sessionStoreAtom(SESSION), { messages } as any);
+    store.set(sessionHasPendingInteractivePromptAtom(SESSION), false);
+    return store;
+  }
+  function submitForm(store: ReturnType<typeof createStore>, promptId: string) {
+    return createRequestUserInputHostActions({
+      sessionId: SESSION,
+      invoke: async () => ({ success: true }),
+      refreshPendingPrompts: (sessionId, settledPromptId) =>
+        store.set(refreshPendingPromptsAtom, sessionId, settledPromptId),
+    }).requestUserInputSubmit(promptId, {});
+  }
+
+  afterEach(() => {
+    delete (globalThis as any).window?.electronAPI;
+  });
+
+  it('keeps the flag cleared when the submitted form was the only open prompt', async () => {
+    const store = clearedByBroadcast([{ type: 'user_message' }, form('toolu_A')]);
+    await submitForm(store, 'toolu_A');
+    expect(store.get(sessionHasPendingInteractivePromptAtom(SESSION))).toBe(false);
+  });
+
+  it('sets the flag for another prompt that is still open in the session', async () => {
+    const store = clearedByBroadcast([{ type: 'user_message' }, form('toolu_A'), form('toolu_B')]);
+    await submitForm(store, 'toolu_B');
+    expect(store.get(sessionHasPendingInteractivePromptAtom(SESSION))).toBe(true);
+  });
+
+  it('keeps the flag cleared after the only tool permission is answered', async () => {
+    ((globalThis as any).window ??= {}).electronAPI = { invoke: async () => ({ success: true }) };
+    const store = clearedByBroadcast([{ type: 'user_message' }, permission('perm-1')]);
+    await store.set(respondToPromptAtom, {
+      sessionId: SESSION,
+      promptId: 'perm-1',
+      promptType: 'permission_request',
+      response: { decision: 'deny', scope: 'once', cancelled: true },
+    });
+    expect(store.get(sessionHasPendingInteractivePromptAtom(SESSION))).toBe(false);
   });
 });

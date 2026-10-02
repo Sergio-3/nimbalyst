@@ -1850,7 +1850,7 @@ const LocalSessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscrip
         });
 
         // Refresh pending prompts from DB
-        refreshPendingPrompts(sessionId);
+        refreshPendingPrompts(sessionId, requestId);
       },
       toolPermissionCancel: async (requestId: string) => {
         // Try SDK cancel (might fail for old/inactive sessions - that's OK)
@@ -1873,7 +1873,7 @@ const LocalSessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscrip
         });
 
         // Refresh pending prompts from DB
-        refreshPendingPrompts(sessionId);
+        refreshPendingPrompts(sessionId, requestId);
       },
 
       // Feedback request operations. Fire-and-forget: send publishes the

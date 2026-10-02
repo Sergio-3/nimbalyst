@@ -358,7 +358,8 @@ export function isInteractivePromptTool(toolName: string): boolean {
  * answerable (see #1341 and `isStrandedPromptAck` in TranscriptProjector).
  */
 export function hasUnansweredInteractivePrompt(
-  messages: Array<{ type?: string; interactivePrompt?: { status?: string }; toolCall?: { toolName?: string; result?: unknown } }>
+  messages: Array<{ type?: string; interactivePrompt?: { status?: string }; toolCall?: { toolName?: string; result?: unknown; providerToolCallId?: string | null; arguments?: unknown } }>,
+  settledPromptId?: string,
 ): boolean {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
@@ -367,18 +368,25 @@ export function hasUnansweredInteractivePrompt(
     // Interactive prompts projected from canonical events
     if (msg.type === 'interactive_prompt' && msg.interactivePrompt?.status === 'pending') return true;
     // Interactive tools stored as tool_calls (from TranscriptTransformer)
-    if (msg.toolCall?.toolName && isInteractivePromptTool(msg.toolCall.toolName) && !msg.toolCall.result) return true;
+    const tool = msg.toolCall;
+    if (!tool?.toolName || !isInteractivePromptTool(tool.toolName) || tool.result) continue;
+    // A prompt answered a moment ago has no result here yet; only others count.
+    if (settledPromptId && (tool.providerToolCallId === settledPromptId
+      || (tool.arguments as { requestId?: unknown } | undefined)?.requestId === settledPromptId)) continue;
+    return true;
   }
   return false;
 }
 
 export const refreshPendingPromptsAtom = atom(
   null,
-  (get, set, sessionId: string) => {
+  (get, set, sessionId: string, settledPromptId?: string) => {
     // Pending prompts are now rendered from canonical transcript events via widgets.
     // Update the unified pending interactive prompt state from session messages.
+    // After an answer, pass its prompt id: the answer's broadcast already cleared
+    // the flag, and this re-derivation must only bring it back for another prompt.
     const messages = get(sessionMessagesAtom(sessionId));
-    set(sessionHasPendingInteractivePromptAtom(sessionId), hasUnansweredInteractivePrompt(messages));
+    set(sessionHasPendingInteractivePromptAtom(sessionId), hasUnansweredInteractivePrompt(messages, settledPromptId));
   }
 );
 
@@ -441,7 +449,7 @@ export const respondToPromptAtom = atom(
       }
 
       // 3. Refresh pending prompts to remove the answered one
-      await set(refreshPendingPromptsAtom, sessionId);
+      await set(refreshPendingPromptsAtom, sessionId, promptId);
 
       return true;
     } catch (error) {
