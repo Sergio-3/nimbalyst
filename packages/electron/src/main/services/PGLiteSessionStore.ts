@@ -54,6 +54,16 @@ function buildSessionArchiveFilter(includeArchived: boolean, sessionAlias = 's',
 // for the metadata-corruption postmortem.
 const normalizeJsonObject = parseJsonObjectColumn;
 
+/** A metadata column SQL can merge into: absent, or a stored JSON object (not a string or array). */
+function isStoredJsonObject(value: unknown): boolean {
+  if (value == null) return true;
+  let parsed = value;
+  if (typeof value === 'string') {
+    try { parsed = JSON.parse(value); } catch { return false; }
+  }
+  return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
+}
+
 /**
  * Parse a TEXT column that's supposed to hold JSON back into the value the
  * runtime expects. Under PGLite (JSONB) reads return parsed values directly,
@@ -602,7 +612,10 @@ export function createPGLiteSessionStore(db: PGliteLike, ensureDbReady?: EnsureR
             [sessionId],
           );
           const existingMetadata = normalizeJsonObject(rows[0]?.metadata);
-          const merged: Record<string, any> = { ...existingMetadata, ...normalizedIncoming };
+          // Only the incoming keys are written, merged in SQL. Writing back the whole
+          // blob read above let two overlapping updates each drop the other's keys: a
+          // question's `hasPendingPrompt` vanished when a token-usage write raced it.
+          const patch: Record<string, any> = { ...normalizedIncoming };
           // Record workflow-phase transitions into metadata.activity[] so the
           // session's lifecycle history is self-contained and renderable on the
           // project-graph timeline (see session/sessionPhaseTransition.ts). This
@@ -618,10 +631,16 @@ export function createPGLiteSessionStore(db: PGliteLike, ensureDbReady?: EnsureR
               null,
               Date.now(),
             );
-            if (transition.changed) merged.activity = transition.metadata.activity;
+            if (transition.changed) patch.activity = transition.metadata.activity;
           }
-          updates.push(`metadata = $${values.length + 1}`);
-          values.push(JSON.stringify(merged));
+          if (isStoredJsonObject(rows[0]?.metadata)) {
+            updates.push(`metadata = COALESCE(metadata, '{}'::jsonb) || $${values.length + 1}::jsonb`);
+            values.push(JSON.stringify(patch));
+          } else {
+            // A malformed column cannot be merged into; replace it with the repaired object.
+            updates.push(`metadata = $${values.length + 1}`);
+            values.push(JSON.stringify({ ...existingMetadata, ...patch }));
+          }
         }
       }
       if ((metadata as any).hasBeenNamed !== undefined) pushUpdate('has_been_named =', (metadata as any).hasBeenNamed);
