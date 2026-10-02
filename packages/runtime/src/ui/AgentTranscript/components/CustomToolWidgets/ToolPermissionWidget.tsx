@@ -141,6 +141,7 @@ export const ToolPermissionWidget: React.FC<CustomToolWidgetProps> = ({
           decision: parsed.decision as 'allow' | 'deny',
           scope: parsed.scope as PermissionScope,
           cancelled: parsed.cancelled || false,
+          expired: parsed.reason === 'expired',
         };
       } catch {
         // Try to infer from string
@@ -271,14 +272,18 @@ export const ToolPermissionWidget: React.FC<CustomToolWidgetProps> = ({
   // Determine display state
   const displayResult = localResult || completedState;
   const displayCancelled = displayResult?.cancelled || false;
+  // Dropped without an answer (#1183); a local click result never carries it.
+  const displayExpired = (!localResult && completedState?.expired) || false;
 
   // Show completed state
   if (displayResult || hasResponded) {
-    const statusText = displayCancelled
-      ? 'Permission Cancelled'
-      : displayResult?.decision === 'allow'
-        ? 'Permission Granted'
-        : 'Permission Denied';
+    const statusText = displayExpired
+      ? 'Permission Expired'
+      : displayCancelled
+        ? 'Permission Cancelled'
+        : displayResult?.decision === 'allow'
+          ? 'Permission Granted'
+          : 'Permission Denied';
 
     const statusColor = displayCancelled
       ? 'text-nim-muted'
@@ -286,18 +291,20 @@ export const ToolPermissionWidget: React.FC<CustomToolWidgetProps> = ({
         ? 'text-nim-success'
         : 'text-nim-error';
 
-    const scopeText = displayResult?.scope === 'always-all'
-      ? 'All Domains'
-      : displayResult?.scope === 'always'
-        ? 'Always'
-        : displayResult?.scope === 'session'
-          ? 'This Session'
-          : 'Once';
+    const scopeText = displayExpired
+      ? 'Expired'
+      : displayResult?.scope === 'always-all'
+        ? 'All Domains'
+        : displayResult?.scope === 'always'
+          ? 'Always'
+          : displayResult?.scope === 'session'
+            ? 'This Session'
+            : 'Once';
 
     return (
       <div
         data-testid="tool-permission-widget"
-        data-state={displayResult?.decision === 'allow' ? 'granted' : 'denied'}
+        data-state={displayExpired ? 'expired' : displayResult?.decision === 'allow' ? 'granted' : 'denied'}
         className="tool-permission-widget rounded-lg bg-nim-secondary border border-nim overflow-hidden opacity-85"
       >
         <div className="flex items-center gap-2 py-3 px-4 bg-nim-tertiary">

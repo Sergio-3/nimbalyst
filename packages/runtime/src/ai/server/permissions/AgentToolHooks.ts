@@ -446,10 +446,13 @@ export class AgentToolHooks {
           },
         };
       } catch (error) {
+        // Dropped without an answer (abort, query end): the main process closes
+        // the widget as expired. A user cancel reserved its answer first and wins.
         this.emit('toolPermission:resolved', {
           requestId,
           sessionId: this.sessionId,
           response: { decision: 'deny', scope: 'once' },
+          expired: true,
           timestamp: Date.now(),
         });
         this.logSecurity('[PermissionDenied] Re-prompt failed or aborted:', {

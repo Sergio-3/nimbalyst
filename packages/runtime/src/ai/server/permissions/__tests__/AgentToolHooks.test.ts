@@ -389,6 +389,37 @@ describe('AgentToolHooks', () => {
         'toolPermission:resolved',
         expect.objectContaining({ response: { decision: 'deny', scope: 'once' } })
       );
+      expect(options.emit).not.toHaveBeenCalledWith('toolPermission:resolved', expect.objectContaining({ expired: true }));
+    });
+
+    // #1183: a re-prompt dropped without an answer (query end, abort) must be
+    // closed as expired, but only once it is dropped -- a waiting one stays open.
+    it('marks the re-prompt expired when its request is aborted, and not before', async () => {
+      const pending = new Map<string, any>();
+      const options = createMockOptions({
+        getCurrentMode: () => 'auto',
+        getPendingToolPermissions: () => pending,
+        getSessionApprovedPatterns: () => new Set<string>(),
+      });
+      const hook = new AgentToolHooks(options).createPermissionDeniedHook();
+      const controller = new AbortController();
+
+      const resultPromise = hook(
+        { tool_name: 'Bash', tool_input: { command: 'rm -rf ~' }, reason: 'destructive' },
+        'tool-use-denied-5',
+        { signal: controller.signal }
+      );
+      await vi.waitFor(() => expect(pending.size).toBe(1));
+      expect(options.emit).not.toHaveBeenCalledWith('toolPermission:resolved', expect.anything());
+      const [requestId] = [...pending.keys()];
+
+      controller.abort();
+
+      await expect(resultPromise).resolves.toEqual({});
+      expect(options.emit).toHaveBeenCalledWith(
+        'toolPermission:resolved',
+        expect.objectContaining({ requestId, expired: true })
+      );
     });
   });
 
