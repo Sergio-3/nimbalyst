@@ -10,6 +10,7 @@ import {
   sessionListWorkspaceAtom,
   sessionProcessingAtom,
   sessionRegistryAtom,
+  sessionStoreAtom,
   sessionUnreadAtom,
 } from '../sessions';
 
@@ -186,5 +187,32 @@ describe('agentSessionAttentionAtom: complete-phase session still working', () =
     store.set(sessionProcessingAtom('done-working'), true);
 
     expect(store.get(agentSessionAttentionAtom)).toEqual({ awaitingInput: [], running: [], unread: [] });
+  });
+});
+
+describe('agentSessionAttentionAtom: sub-agent drain counts as running', () => {
+  // The lead turn is done but background sub-agents still work; the session
+  // list spins for it (#1269), so the popover counts it as running too.
+  function drain(store: ReturnType<typeof setup>, id: string) {
+    store.set(sessionStoreAtom(id), { metadata: { backgroundDrain: true } } as never);
+  }
+
+  it('counts a draining session as running while it is no longer processing', () => {
+    const store = setup(session('draining', { phase: 'implementing' }));
+    drain(store, 'draining');
+
+    const groups = store.get(agentSessionAttentionAtom);
+    expect(groups.running.map((item) => item.id)).toEqual(['draining']);
+    expect(groups.unread).toEqual([]);
+  });
+
+  it('surfaces a draining complete-phase session as unread when it is unread', () => {
+    const store = setup(session('done-draining', { phase: 'complete' }));
+    drain(store, 'done-draining');
+    store.set(sessionUnreadAtom('done-draining'), true);
+
+    const groups = store.get(agentSessionAttentionAtom);
+    expect(groups.running).toEqual([]);
+    expect(groups.unread.map((item) => item.id)).toEqual(['done-draining']);
   });
 });

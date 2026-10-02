@@ -219,7 +219,12 @@ export const agentSessionAttentionAtom = atom<AgentSessionAttentionGroups>((get)
   for (const session of sessions) {
     if (get(sessionHasPendingInteractivePromptAtom(session.id))) {
       groups.awaitingInput.push(session);
-    } else if (get(sessionProcessingAtom(session.id)) && session.phase !== 'complete') {
+    } else if (
+      // A sub-agent drain is still work: the session list spins for it, so
+      // the popover must count it too. #1269.
+      (get(sessionProcessingAtom(session.id)) || get(sessionBackgroundDrainAtom(session.id))) &&
+      session.phase !== 'complete'
+    ) {
       groups.running.push(session);
     } else if (get(sessionUnreadAtom(session.id))) {
       groups.unread.push(session);
