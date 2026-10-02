@@ -559,11 +559,13 @@ export class ToolPermissionService {
 
       return response;
     } catch (error) {
-      // Emit resolved event on error path so the "waiting for input" indicator is cleared
+      // Emit resolved event on error path so the "waiting for input" indicator is cleared;
+      // `expired` lets the main process close the widget (abort, poll timeout).
       this.emit('toolPermission:resolved', {
         requestId,
         sessionId,
         response: { decision: 'deny', scope: 'once' },
+        expired: true,
         timestamp: Date.now(),
       });
       this.securityLogger('[ToolPermissionService] Permission request failed', {

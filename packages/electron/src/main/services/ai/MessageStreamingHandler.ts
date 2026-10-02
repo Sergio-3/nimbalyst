@@ -4,6 +4,7 @@ import type { SessionChange } from '@nimbalyst/runtime/sync/types';
 import { sessionInbox } from './sessionInboxService';
 import { codexQuestionTurns } from './codexQuestionTurns';
 import { supersedeOpenQuestions } from './supersedeOpenQuestions';
+import { closeExpiredToolPermission } from './expiredToolPermission';
 /**
  * Streaming message handler for AIService.
  *
@@ -1070,10 +1071,17 @@ export class MessageStreamingHandler {
     this.installListener(provider, 'toolPermission:pending', onToolPermissionPending);
 
     // Listen for tool permission resolved and forward to renderer
-    const onToolPermissionResolved = (data: { requestId: string; sessionId: string; response: any; timestamp: number }) => {
+    const onToolPermissionResolved = (data: { requestId: string; sessionId: string; response: any; expired?: boolean; timestamp: number }) => {
       logger.main.info('[AIService] Tool permission resolved:', data.requestId);
       safeSend(event, 'ai:toolPermissionResolved', { ...data, workspacePath: effectiveWorkspacePath });
       resolvePrompt(data.sessionId, data.requestId);
+      if (data.expired) {
+        void closeExpiredToolPermission(data.sessionId, data.requestId).then((closed) => {
+          if (closed) safeSend(event, 'ai:message-logged', { sessionId: data.sessionId, direction: 'output', workspacePath: effectiveWorkspacePath });
+        }).catch((err) => {
+          logger.main.warn('[AIService] Failed to close expired tool permission:', err);
+        });
+      }
       if (hasOpenPrompts(data.sessionId)) return;
 
       // Update session status back to running so all windows clear the pending indicator

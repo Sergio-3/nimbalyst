@@ -395,6 +395,7 @@ export async function handleToolPermissionFallback(
       requestId,
       sessionId,
       response: { decision: 'deny', scope: 'once' },
+      expired: true,
       timestamp: Date.now()
     });
     deps.logSecurity('[canUseTool] Permission request failed (fallback):', {

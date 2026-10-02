@@ -1838,11 +1838,14 @@ const LocalSessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscrip
 
       // Tool permission operations
       toolPermissionSubmit: async (requestId: string, response: { decision: 'allow' | 'deny'; scope: 'once' | 'session' | 'always' | 'always-all' }) => {
-        await window.electronAPI.invoke('claude-code:answer-tool-permission', {
+        const result = await window.electronAPI.invoke('claude-code:answer-tool-permission', {
           requestId,
           sessionId,
           response,
         });
+        // A refused answer (request expired or answered elsewhere) must not
+        // leave the widget showing the click as granted (#1183).
+        if (result?.success === false) throw new Error(result.error || 'Permission answer refused');
 
         posthog?.capture('tool_permission_responded', {
           decision: response.decision,
