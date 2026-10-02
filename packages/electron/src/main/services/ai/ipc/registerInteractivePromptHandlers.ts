@@ -92,7 +92,7 @@ export function registerInteractivePromptHandlers(ctx: AIServiceContext): void {
     }
   });
 
-  registerAskUserQuestionAnswerHandler(ctx);
+  registerAskUserQuestionAnswerHandler();
 
   // Handle AskUserQuestion cancel from renderer
   // Rejects the pending promise and aborts the AI request
