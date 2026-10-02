@@ -78,8 +78,10 @@ const BASE_THEMES = ['light', 'dark', 'crystal-dark'] as const;
  * The island's entry skips the app's theme module (it drags in the runtime
  * barrel), so it applies the theme itself. The base class alone is not enough:
  * NimbalystTheme.css only carries light fallbacks, and the real `--nim-*`
- * colors are inline styles that useTheme writes. Crystal-dark and extension
- * themes get the base dark/light palette here, not their own colors.
+ * colors are inline styles that useTheme writes. File themes (crystal-dark,
+ * solarized, ...) then get their own colors over the base palette via
+ * `theme:get`; extension themes live only in the app renderer's registry, so
+ * `theme:get` cannot load them and they keep the base palette.
  */
 function applyIslandBaseTheme(): void {
   const resolved = window.electronAPI.getResolvedThemeSync?.();
@@ -96,9 +98,31 @@ function applyIslandBaseTheme(): void {
   }
 }
 
-export function initMenuBarIslandListener(): () => void {
+let themeRequest = 0;
+
+async function applyIslandTheme(): Promise<void> {
   applyIslandBaseTheme();
-  const unsubscribeTheme = window.electronAPI.on('theme-change', applyIslandBaseTheme);
+  const request = ++themeRequest;
+  const id = window.electronAPI.getThemeSync?.();
+  if (!id || id === 'light' || id === 'dark') return;
+  let colors: Partial<ExtendedThemeColors> | undefined;
+  try {
+    colors = (await window.electronAPI.invoke('theme:get', id))?.colors;
+  } catch {
+    return;
+  }
+  // A later theme-change already repainted; do not overwrite it.
+  if (request !== themeRequest || !colors) return;
+  const root = document.documentElement;
+  for (const [key, cssVar] of Object.entries(CSS_VAR_MAP)) {
+    const value = colors[key as keyof ExtendedThemeColors];
+    if (value) root.style.setProperty(cssVar, value);
+  }
+}
+
+export function initMenuBarIslandListener(): () => void {
+  void applyIslandTheme();
+  const unsubscribeTheme = window.electronAPI.on('theme-change', () => void applyIslandTheme());
   const unsubscribe = window.electronAPI.on(
     MENU_BAR_ISLAND_CHANNELS.state,
     (next: MenuBarIslandState) => {
