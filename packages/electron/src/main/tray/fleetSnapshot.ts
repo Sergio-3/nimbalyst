@@ -89,7 +89,7 @@ export interface TraySessionInfo {
    * re-deriving it, and so a later retune is a change to one predicate.
    */
   turnInFlight?: boolean;
-  /** Kanban phase. `complete` sessions are hidden, matching the in-app popover. */
+  /** Kanban phase. `complete` only keeps a running session out of the running count, matching the in-app popover. */
   phase?: string;
   /** Archived sessions are hidden, matching the in-app popover. */
   isArchived?: boolean;
@@ -352,8 +352,8 @@ export function deriveFleetSnapshot(
             considerPriority(session, 'running', session.startedAt);
           }
         }
+        continue;
       }
-      continue;
     }
 
     // A finished session is worth naming, but is not waiting on anything -- it

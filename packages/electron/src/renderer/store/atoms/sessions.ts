@@ -219,10 +219,8 @@ export const agentSessionAttentionAtom = atom<AgentSessionAttentionGroups>((get)
   for (const session of sessions) {
     if (get(sessionHasPendingInteractivePromptAtom(session.id))) {
       groups.awaitingInput.push(session);
-    } else if (get(sessionProcessingAtom(session.id))) {
-      if (session.phase !== 'complete') {
-        groups.running.push(session);
-      }
+    } else if (get(sessionProcessingAtom(session.id)) && session.phase !== 'complete') {
+      groups.running.push(session);
     } else if (get(sessionUnreadAtom(session.id))) {
       groups.unread.push(session);
     }

@@ -213,16 +213,14 @@ export function groupTraySessions(
   for (const session of visible) {
     if (session.hasPendingPrompt || session.status === 'error') {
       feed.needsAttention.push(toPanelSession(session, session.hasPendingPrompt));
-    } else if (session.status === 'running') {
-      if (session.phase !== 'complete') {
-        // The same `isStalled` the snapshot uses, not a second copy of the
-        // rule: the panel is the sentence form of the strip, so the two must
-        // not be able to disagree about which sessions have gone quiet. Both
-        // callers are handed a clock rather than reading one, so both are
-        // testable without faking time.
-        const bucket = isStalled(session, now) ? feed.stalled : feed.running;
-        bucket.push(toPanelSession(session, false));
-      }
+    } else if (session.status === 'running' && session.phase !== 'complete') {
+      // The same `isStalled` the snapshot uses, not a second copy of the
+      // rule: the panel is the sentence form of the strip, so the two must
+      // not be able to disagree about which sessions have gone quiet. Both
+      // callers are handed a clock rather than reading one, so both are
+      // testable without faking time.
+      const bucket = isStalled(session, now) ? feed.stalled : feed.running;
+      bucket.push(toPanelSession(session, false));
     } else if (session.hasUnread) {
       feed.unread.push(toPanelSession(session, false));
     }

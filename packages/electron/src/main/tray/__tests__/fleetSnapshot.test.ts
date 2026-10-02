@@ -481,3 +481,23 @@ describe('StripStateMachine', () => {
     expect(machine.update(snapshot, NOW)).toMatchObject({ mode: 'counts', running: 1, age: null });
   });
 });
+
+describe('deriveFleetSnapshot: complete-phase session still running', () => {
+  // Same rule as groupTraySessions: `complete` takes a running session out of
+  // the running count, not out of the unread one.
+  it('counts a running complete-phase session with unread output as unread', () => {
+    const snapshot = deriveFleetSnapshot([
+      session({ sessionId: 'done-working', phase: 'complete', hasUnread: true }),
+    ], 1, { now: NOW });
+
+    expect(snapshot).toMatchObject({ running: 0, stalled: 0, unread: 1 });
+  });
+
+  it('does not count a running complete-phase session with nothing unread at all', () => {
+    const snapshot = deriveFleetSnapshot([
+      session({ sessionId: 'done-working', phase: 'complete' }),
+    ], 1, { now: NOW });
+
+    expect(snapshot).toMatchObject({ running: 0, stalled: 0, unread: 0, needsApproval: 0, needsDecision: 0, failed: 0 });
+  });
+});
