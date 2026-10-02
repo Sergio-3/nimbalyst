@@ -30,7 +30,7 @@ import type { TodoItem } from '@nimbalyst/runtime/ui/AgentTranscript/types';
 import { isToolLikeMessage } from '@nimbalyst/runtime/ui/AgentTranscript/utils/messageTypeHelpers';
 import type { AIInputRef } from './AIInput';
 import { SessionAIInput } from './SessionAIInput';
-import { PromptQueueList } from './PromptQueueList';
+import { PromptQueueList, emptyEnterSendNow, sendNowOutcome } from './PromptQueueList';
 import { TranscriptEmbeddedFileCard } from './TranscriptEmbeddedFileCard';
 import { getDiffPeekSizeForInteractiveWidgetHost } from './interactiveWidgetHostProxy';
 import { createFeedbackComposeHost } from '../FeedbackRequest/createFeedbackComposeHost';
@@ -1537,6 +1537,9 @@ const LocalSessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscrip
       console.error('[SessionTranscript] Failed to interrupt for send-now:', error);
     }
   }, [sessionId, workspacePath]);
+  // One source for the button and for Enter in an empty input, so the two
+  // cannot disagree about when send-now exists.
+  const sendNowHandler = isLoading && !isClaudeCliTerminalSession(provider) ? handleSendNowQueuedPrompt : undefined;
 
   const handleCloseAndArchive = useCallback(async () => {
     try {
@@ -2708,7 +2711,7 @@ const LocalSessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscrip
         queue={queuedPrompts}
         onCancel={handleCancelQueuedPrompt}
         onEdit={handleEditQueuedPrompt}
-        onSendNow={isLoading && !isClaudeCliTerminalSession(provider) ? handleSendNowQueuedPrompt : undefined}
+        onSendNow={sendNowHandler}
         backgroundDrainActive={backgroundDrainActive}
         hasRunningTasks={hasRunningTasks}
       />
@@ -2721,6 +2724,7 @@ const LocalSessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscrip
         ref={inputRef}
         testId={mode === 'chat' ? 'files-mode-chat-input' : 'agent-mode-chat-input'}
         onSend={handleSend}
+        onEmptyEnter={emptyEnterSendNow(sendNowHandler, queuedPrompts, sendNowOutcome(backgroundDrainActive, hasRunningTasks))}
         onCancel={handleCancel}
         isLoading={isLoading}
         workspacePath={workspacePath}

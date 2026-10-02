@@ -51,6 +51,23 @@ export function sendNowOutcome(
   return backgroundDrainActive ? 'safe' : 'interrupt';
 }
 
+/**
+ * What Enter in an empty input does while prompts wait: the same as a click on
+ * the send-now button, for the prompt at the head of the queue — the one the
+ * main process takes anyway. Only while the click is `safe`: a keystroke must
+ * never be the easiest way to stop delegated work, so in the `interrupt` state
+ * there is no handler and Enter stays a no-op; the deliberate click remains.
+ */
+export function emptyEnterSendNow(
+  onSendNow: ((id: string, prompt: string) => void) | undefined,
+  queue: QueuedPrompt[],
+  outcome: SendNowOutcome,
+): (() => void) | undefined {
+  const head = queue[0];
+  if (!onSendNow || !head || outcome !== 'safe') return undefined;
+  return () => onSendNow(head.id, head.prompt);
+}
+
 const SEND_NOW_TITLES: Record<SendNowOutcome, string> = {
   safe: 'Sends now by interrupting the agent — that ends the current answer and nothing else: no delegated task is stopped by it.',
   interrupt: 'Sends now by interrupting the agent while it is still working — thinking and tool calls count, not just visible output — which also stops every delegated task still running.',

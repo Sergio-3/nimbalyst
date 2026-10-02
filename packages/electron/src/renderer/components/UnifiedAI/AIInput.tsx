@@ -46,6 +46,8 @@ export interface AIInputProps {
   value: string;
   onChange: (value: string) => void;
   onSend: (message?: string) => void;
+  /** Enter with nothing typed and nothing attached. Absent: Enter does nothing, as before. */
+  onEmptyEnter?: () => void;
   onCancel?: () => void;
   disabled?: boolean;
   isLoading?: boolean;
@@ -159,10 +161,11 @@ export const AIInput = forwardRef<AIInputRef, AIInputProps>(
     value,
     onChange,
     onSend,
+    onEmptyEnter,
     onCancel,
     disabled,
     isLoading,
-    placeholder = "Type your message... (Enter to send, Shift+Enter for new line, @ for files, @@ for sessions, / for commands)",
+    placeholder ="Type your message... (Enter to send, Shift+Enter for new line, @ for files, @@ for sessions, / for commands)",
     workspacePath,
     remoteSession = false,
     remoteFiles,
@@ -1023,6 +1026,8 @@ export const AIInput = forwardRef<AIInputRef, AIInputProps>(
         e.preventDefault();
         if (value.trim() && !disabled && processingAttachments.length === 0) {
           onSend(value);
+        } else if (!value.trim() && attachments.length === 0 && processingAttachments.length === 0 && !disabled) {
+          onEmptyEnter?.();
         }
       }
     };
