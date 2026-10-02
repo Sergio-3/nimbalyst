@@ -92,6 +92,7 @@ vi.mock('../../../../storage/repositories/AISessionsRepository', () => ({
 }));
 
 import { ClaudeCodeProvider } from '../ClaudeCodeProvider';
+import { SessionManager } from '../../SessionManager';
 import { AgentMessagesRepository } from '../../../../storage/repositories/AgentMessagesRepository';
 import type { StreamChunk } from '../../types';
 
@@ -579,6 +580,50 @@ describe('ClaudeCodeProvider send-now during a sub-agent drain', () => {
     // that this session is working: the flag is the only signal it has.
     expect(internals(provider).drainingBackgroundTasks).toBe(true);
     expect(store.metadata.backgroundDrain).toBe(true);
+
+    provider.abort();
+    await turn.done;
+  }, 20_000);
+
+  // The live-state stamp only reaches writers inside the provider. The token
+  // usage writer sits in SessionManager and is called from the `complete`
+  // branch of the streaming handler — the same instant the drain update goes
+  // out, fire-and-forget. It read the whole blob and wrote the whole blob back,
+  // so it reverted `backgroundDrain` exactly like the provider writers above
+  // did, and the drain publisher's debounce kept the revert in place.
+  //
+  // Observed after the provider writers were fixed: the send-now light stood
+  // red on 2026-09-10, 2026-09-15 and 2026-09-29 while the handover was safe.
+  it('keeps backgroundDrain readable when the token usage write overlaps the drain update', async () => {
+    published.drain.length = 0;
+    store.metadata = {};
+    store.gate = null;
+    const cli = fakeCliFleet();
+    const provider = new ClaudeCodeProvider();
+    const sessions = new SessionManager();
+
+    const turn = startTurn(provider, 'start the sweep');
+    await waitFor(() => cli[0]?.promptsDelivered.length === 1, 'the first prompt to reach stdin');
+    cli[0]!.emit({ type: 'system', subtype: 'task_started', task_id: 'sweep', description: 'Long background sweep' });
+
+    // The token usage writer reads the session before the drain flag is out.
+    let openGate = () => {};
+    store.gate = new Promise<void>(resolve => { openGate = resolve; });
+    const usageWrite = sessions.updateSessionTokenUsage('session-1', {
+      inputTokens: 10, outputTokens: 5, totalTokens: 15,
+    } as any);
+    await waitFor(() => store.gate === null, 'the usage writer to take its snapshot');
+
+    cli[0]!.emit({ type: 'result', subtype: 'success', result: 'kicked off', usage: {} });
+    await waitFor(() => internals(provider).drainingBackgroundTasks, 'the lead turn to enter the drain');
+    await waitFor(() => published.drain.at(-1) === true, 'the drain to be published');
+
+    openGate();
+    await usageWrite;
+
+    expect(internals(provider).drainingBackgroundTasks).toBe(true);
+    expect(store.metadata.backgroundDrain).toBe(true);
+    expect(store.metadata.tokenUsage).toMatchObject({ totalTokens: 15 });
 
     provider.abort();
     await turn.done;
