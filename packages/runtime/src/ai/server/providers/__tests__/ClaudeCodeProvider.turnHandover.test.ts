@@ -47,10 +47,10 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
  */
 const published = vi.hoisted(() => ({ drain: [] as boolean[] }));
 /**
- * What the session row actually holds. The provider builds the whole blob
- * itself (`{...currentMetadata, ownField}`) and hands it over, so the store
- * replaces rather than merges — and a writer that drops a key drops it for
- * everyone. Keeping the state here is what makes the difference between
+ * What the session row actually holds. The store shallow-merges the incoming
+ * blob over a fresh read, as PGLiteSessionStore.updateMetadata does: a writer
+ * sending only its own field cannot lose anything, a writer sending a whole
+ * stale blob reverts every key in it. Keeping the state here is what makes the difference between
  * "published once" and "still readable" visible; a mock returning a fresh `{}`
  * from `get()` can only ever show the former.
  */
@@ -86,12 +86,13 @@ vi.mock('../../../../storage/repositories/AISessionsRepository', () => ({
       // the provider's own live task objects, so mutating a task's status
       // rewrites every blob ever "stored" — and a writer holding a stale blob
       // looks up to date. That hides staleness bugs in any mutable field.
-      if (patch.metadata) store.metadata = structuredClone(patch.metadata);
+      if (patch.metadata) store.metadata = structuredClone({ ...store.metadata, ...patch.metadata });
     },
   },
 }));
 
 import { ClaudeCodeProvider } from '../ClaudeCodeProvider';
+import { AgentMessagesRepository } from '../../../../storage/repositories/AgentMessagesRepository';
 import type { StreamChunk } from '../../types';
 
 /**
@@ -236,6 +237,12 @@ describe('ClaudeCodeProvider send-now during a sub-agent drain', () => {
   // silent no-op and the snapshots never arrive.
   beforeEach(() => {
     history.snapshots.length = 0;
+    // Message logging goes through a write queue whose rejection fails the turn
+    // outright, so without a store every turn here ended at its first prompt.
+    AgentMessagesRepository.setStore({
+      create: async () => {},
+      list: async () => [],
+    });
     ClaudeCodeProvider.setHistoryManager({
       createSnapshot: async (filePath: string) => { history.snapshots.push(filePath); },
       getPendingTags: async () => [],
