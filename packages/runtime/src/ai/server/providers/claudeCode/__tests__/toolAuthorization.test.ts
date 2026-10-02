@@ -205,6 +205,29 @@ describe('handleToolPermissionFallback', () => {
       assertZodCompliantDeny(result);
       expect(result.message).toBe('Session ended');
     });
+
+    // #1183: the widget closes as expired only for a dropped request.
+    it('marks a dropped request expired and an answered one not', async () => {
+      const controller = new AbortController();
+      const deps = createDeps();
+      const resultPromise = handleToolPermissionFallback(deps, createParams({ options: { signal: controller.signal } }));
+      await vi.waitFor(() => {
+        expect(deps.permissions.pendingToolPermissions.size).toBe(1);
+      });
+      expect(deps.emit).not.toHaveBeenCalledWith('toolPermission:resolved', expect.anything());
+      controller.abort();
+      await resultPromise;
+      expect(deps.emit).toHaveBeenCalledWith('toolPermission:resolved', expect.objectContaining({ expired: true }));
+
+      const answered = createDeps();
+      const answeredPromise = handleToolPermissionFallback(answered, createParams());
+      await vi.waitFor(() => {
+        expect(answered.permissions.pendingToolPermissions.size).toBe(1);
+      });
+      [...answered.permissions.pendingToolPermissions.values()][0].resolve({ decision: 'deny', scope: 'once' });
+      await answeredPromise;
+      expect(answered.emit).not.toHaveBeenCalledWith('toolPermission:resolved', expect.objectContaining({ expired: true }));
+    });
   });
 
   describe('pattern persistence', () => {
