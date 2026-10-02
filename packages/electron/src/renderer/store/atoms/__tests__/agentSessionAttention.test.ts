@@ -166,3 +166,25 @@ describe('hasUnansweredInteractivePrompt', () => {
     expect(hasUnansweredInteractivePrompt([userMessage, { type: 'tool_call', toolCall: { toolName: 'Bash' } }])).toBe(false);
   });
 });
+
+describe('agentSessionAttentionAtom: complete-phase session still working', () => {
+  // `phase` only keeps a session out of Running. A session the agent marked
+  // complete but that is still streaming gets flagged unread by every message,
+  // and must land there instead of vanishing from all three groups.
+  it('surfaces a processing complete-phase session as unread when it is unread', () => {
+    const store = setup(session('done-working', { phase: 'complete' }));
+    store.set(sessionProcessingAtom('done-working'), true);
+    store.set(sessionUnreadAtom('done-working'), true);
+
+    const groups = store.get(agentSessionAttentionAtom);
+    expect(groups.running).toEqual([]);
+    expect(groups.unread.map((item) => item.id)).toEqual(['done-working']);
+  });
+
+  it('keeps a processing complete-phase session with nothing unread out of every group', () => {
+    const store = setup(session('done-working', { phase: 'complete' }));
+    store.set(sessionProcessingAtom('done-working'), true);
+
+    expect(store.get(agentSessionAttentionAtom)).toEqual({ awaitingInput: [], running: [], unread: [] });
+  });
+});

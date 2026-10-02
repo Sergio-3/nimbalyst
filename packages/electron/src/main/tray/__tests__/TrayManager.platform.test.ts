@@ -794,3 +794,33 @@ describe('menu bar island render style', () => {
     internals.teardownStrip();
   });
 });
+
+describe('groupTraySessions: complete-phase session still running', () => {
+  const base = {
+    workspacePath: '/Users/dev/projects/nimbalyst',
+    isStreaming: true,
+    hasPendingPrompt: false,
+    hasUnread: false,
+    updatedAt: 999,
+  };
+
+  // `complete` keeps a running session out of Running only; when it has unread
+  // output it belongs in Unread, like any other session the user has not read.
+  it('puts a running complete-phase session with unread output in Unread', () => {
+    const feed = groupTraySessions([
+      { ...base, sessionId: 'done-working', title: 'Done working', status: 'running', phase: 'complete', hasUnread: true },
+    ] as any, 1_000);
+
+    expect(feed.running).toEqual([]);
+    expect(feed.stalled).toEqual([]);
+    expect(feed.unread.map((s) => s.sessionId)).toEqual(['done-working']);
+  });
+
+  it('keeps a running complete-phase session with nothing unread out of every bucket', () => {
+    const feed = groupTraySessions([
+      { ...base, sessionId: 'done-working', title: 'Done working', status: 'running', phase: 'complete' },
+    ] as any, 1_000);
+
+    expect(feed.needsAttention.concat(feed.running, feed.stalled, feed.unread)).toEqual([]);
+  });
+});
