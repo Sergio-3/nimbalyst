@@ -23,7 +23,7 @@ export function createRequestUserInputHostActions(deps: {
   sessionId: string;
   invoke: (channel: string, payload: unknown) => Promise<unknown>;
   capture?: (event: string, properties?: Record<string, unknown>) => void;
-  refreshPendingPrompts: (sessionId: string) => void;
+  refreshPendingPrompts: (sessionId: string, settledPromptId?: string) => void;
 }): Pick<InteractiveWidgetHost, 'requestUserInputSubmit' | 'requestUserInputCancel'> {
   const { sessionId, invoke, capture, refreshPendingPrompts } = deps;
   return {
@@ -44,7 +44,7 @@ export function createRequestUserInputHostActions(deps: {
         numFields: Object.keys(answers).length,
         fieldTypeCounts,
       });
-      refreshPendingPrompts(sessionId);
+      refreshPendingPrompts(sessionId, promptId);
     },
     requestUserInputCancel: async (promptId) => {
       assertPromptResponseAccepted(await invoke('messages:respond-to-prompt', {
@@ -55,7 +55,7 @@ export function createRequestUserInputHostActions(deps: {
         respondedBy: 'desktop' as const,
       }));
       capture?.('request_user_input_cancelled');
-      refreshPendingPrompts(sessionId);
+      refreshPendingPrompts(sessionId, promptId);
     },
   };
 }
