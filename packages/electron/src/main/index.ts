@@ -134,6 +134,7 @@ import {
     store
 } from './utils/store';
 import { shouldShowFirstLaunchOnboarding } from './utils/firstLaunchOnboarding';
+import { buildRestartContinuationPrompt } from './mcp/restartContinuationPrompt';
 import { getAIProviderOverridesWithWorktreeFallback } from './utils/aiSettingsMerge';
 import { registerMCPConfigHandlers } from './ipc/MCPConfigHandlers';
 import { registerMcpSessionStatusHandlers } from './ipc/McpSessionStatusHandlers';
@@ -481,11 +482,7 @@ async function checkForRestartContinuation(aiService: AIService): Promise<void> 
 
         for (const sessionId of sessionIds) {
             try {
-                await queuedPromptsStore.create({
-                    id: `restart-continuation-${sessionId}-${Date.now()}`,
-                    sessionId,
-                    prompt: 'Nimbalyst has restarted. Please continue with your work.'
-                });
+                await queuedPromptsStore.create(buildRestartContinuationPrompt(sessionId, Date.now()));
                 successCount++;
                 logger.main.info(`[RestartContinuation] Queued continuation prompt for session ${sessionId}`);
             } catch (error) {
