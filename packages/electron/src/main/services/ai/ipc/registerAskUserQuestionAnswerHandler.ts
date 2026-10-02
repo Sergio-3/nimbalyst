@@ -18,11 +18,8 @@ import {
 } from "../codexQuestionDelivery";
 import { enqueueWithReceipt } from "../requestUserInputResumption";
 import { hasPersistedTerminalResult } from "../questionTerminalResultLookup";
-import type { AIServiceContext } from "./AIServiceContext";
 
-export function registerAskUserQuestionAnswerHandler(
-  ctx: AIServiceContext
-): void {
+export function registerAskUserQuestionAnswerHandler(): void {
   // Handle AskUserQuestion answer response from renderer
   // Used when Claude's AskUserQuestion tool needs user input
   safeHandle(

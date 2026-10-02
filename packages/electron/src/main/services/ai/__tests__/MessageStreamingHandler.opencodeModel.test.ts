@@ -599,6 +599,35 @@ describe("MessageStreamingHandler resume turn of an answered form", () => {
   });
 });
 
+/**
+ * Runs the turn a send starts with `documentContext` and returns its input row
+ * the way the transcript reads it: the provider's own helper turns the context
+ * the turn received into the row's metadata, `stampPromptSource` reads it back.
+ */
+async function storedInputRow(sessionId: string, text: string, documentContext: Record<string, unknown> | undefined) {
+  let turnContext: Record<string, unknown> | undefined;
+  const turn = new RecordingProvider();
+  turn.sendMessage = async function* (_message: string, context?: Record<string, unknown>) {
+    turnContext = context;
+  } as never;
+  await runTurn({ session: openCodeSession({ id: sessionId }), provider: turn, documentContext });
+  const metadata = (BaseAIProvider.prototype as any).withPromptProvenanceMetadata.call({}, turnContext);
+  return stampPromptSource({ type: "user_message", text } as never, { metadata } as never) as never;
+}
+
+/** Who `row` is stored as, and which question asked before it the transcript still offers to answer. */
+function questionAfter(row: never) {
+  const question = { type: "tool_call", toolCall: { toolName: "mcp__nimbalyst__PromptForUserInput", providerToolCallId: "toolu_open" } };
+  const { open, superseded } = partitionUnansweredQuestions([{ type: "user_message" }, question, row]);
+  return {
+    actor: (row as { promptActor?: string }).promptActor,
+    open: open.map((q) => q.id),
+    superseded: superseded.map((q) => q.id),
+  };
+}
+
+const STAYS_OPEN = { actor: "system", open: ["toolu_open"], superseded: [] };
+
 // A finished background task or teammate wakes the idle lead with a system
 // message. It is not the user moving on, so a question still waiting for an
 // answer must stay open after it. The wake turn's document context decides how
@@ -632,64 +661,20 @@ describe("MessageStreamingHandler wake turn after background work", () => {
       await runTurn({ session: openCodeSession({ id: "wake-session" }), provider: lead, sendMessageHandler });
       await vi.waitFor(() => expect(sendMessageHandler).toHaveBeenCalledTimes(1));
 
-      // Run the wake turn with the context it was sent with and record what
-      // the provider logs its input row with.
-      let wakeTurnContext: Record<string, unknown> | undefined;
-      const wakeTurn = new RecordingProvider();
-      wakeTurn.sendMessage = async function* (_message: string, context?: Record<string, unknown>) {
-        wakeTurnContext = context;
-      } as never;
-      await runTurn({ session: openCodeSession({ id: "wake-session" }), provider: wakeTurn, documentContext: wakeSends[0] });
+      // Run the wake turn with the context it was sent with.
+      const wakeRow = await storedInputRow(
+        "wake-session",
+        "[System: background task(s) you launched have settled: done]",
+        wakeSends[0],
+      );
 
-      const wakeRow = stampPromptSource(
-        { type: "user_message", text: "[System: background task(s) you launched have settled: done]" } as never,
-        {
-          metadata: {
-            ...(wakeTurnContext?.promptProvenance ? { promptProvenance: wakeTurnContext.promptProvenance } : {}),
-            ...(wakeTurnContext?.promptOrigin ? { promptOrigin: wakeTurnContext.promptOrigin } : {}),
-          },
-        } as never,
-      ) as never;
-      const question = { type: "tool_call", toolCall: { toolName: "mcp__nimbalyst__PromptForUserInput", providerToolCallId: "toolu_open" } };
-      const { open, superseded } = partitionUnansweredQuestions([{ type: "user_message" }, question, wakeRow]);
-
-      expect(superseded).toEqual([]);
-      expect(open.map((q) => q.id)).toEqual(["toolu_open"]);
+      expect(questionAfter(wakeRow)).toEqual(STAYS_OPEN);
     } finally {
       mocks.stateManager.isSessionActive.mockReturnValue(false);
       vi.mocked(findWindowByWorkspace).mockReturnValue(null as never);
     }
   });
 });
-
-/**
- * Runs the turn a send starts with `documentContext` and returns its input row
- * the way the transcript reads it: the provider's own helper turns the context
- * the turn received into the row's metadata, `stampPromptSource` reads it back.
- */
-async function storedInputRow(sessionId: string, text: string, documentContext: Record<string, unknown> | undefined) {
-  let turnContext: Record<string, unknown> | undefined;
-  const turn = new RecordingProvider();
-  turn.sendMessage = async function* (_message: string, context?: Record<string, unknown>) {
-    turnContext = context;
-  } as never;
-  await runTurn({ session: openCodeSession({ id: sessionId }), provider: turn, documentContext });
-  const metadata = (BaseAIProvider.prototype as any).withPromptProvenanceMetadata.call({}, turnContext);
-  return stampPromptSource({ type: "user_message", text } as never, { metadata } as never) as never;
-}
-
-/** Who `row` is stored as, and which question asked before it the transcript still offers to answer. */
-function questionAfter(row: never) {
-  const question = { type: "tool_call", toolCall: { toolName: "mcp__nimbalyst__PromptForUserInput", providerToolCallId: "toolu_open" } };
-  const { open, superseded } = partitionUnansweredQuestions([{ type: "user_message" }, question, row]);
-  return {
-    actor: (row as { promptActor?: string }).promptActor,
-    open: open.map((q) => q.id),
-    superseded: superseded.map((q) => q.id),
-  };
-}
-
-const STAYS_OPEN = { actor: "system", open: ["toolu_open"], superseded: [] };
 
 // The app, not the user, sends these. Each must leave a question that was
 // waiting for an answer open, like the wake message above.

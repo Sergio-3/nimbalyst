@@ -15,12 +15,13 @@ const h = vi.hoisted(() => {
     rows: [] as Array<{ sessionId: string; toolUseId: string; result: any; source?: string }>,
     messages: [] as unknown[],
     receipts: new Set<string>(),
+    queueCreate: vi.fn(async (row: { id: string }) => row),
     reservations: new Map<string, unknown>(),
     handlers: new Map<string, (...args: any[]) => any>(),
   };
 });
 
-vi.mock('electron', () => ({ ipcMain: h.ipcMain }));
+vi.mock('electron', () => ({ ipcMain: h.ipcMain, BrowserWindow: { getAllWindows: () => [] } }));
 vi.mock('../../../utils/logger', () => ({
   logger: { main: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } },
 }));
@@ -28,7 +29,10 @@ vi.mock('../../../utils/transcriptHelpers', () => ({
   loadViewMessages: vi.fn(async () => ({ success: true, messages: h.messages })),
 }));
 vi.mock('../../RepositoryManager', () => ({
-  getQueuedPromptsStore: () => ({ get: async (id: string) => (h.receipts.has(id) ? { id, status: 'pending' } : null) }),
+  getQueuedPromptsStore: () => ({
+    get: async (id: string) => (h.receipts.has(id) ? { id, status: 'pending' } : null),
+    create: h.queueCreate,
+  }),
 }));
 vi.mock('../../../mcp/tools/interactivePromptTranscript', async () => {
   const seen = await import('../claudeCliToolResultSeen');
@@ -108,6 +112,7 @@ import { codexQuestionRecoveryId, deliverCodexQuestionAnswer } from '../codexQue
 import { registerAskUserQuestionAnswerHandler } from '../ipc/registerAskUserQuestionAnswerHandler';
 import { markToolResultPersisted } from '../claudeCliToolResultSeen';
 import { clearTerminalizedAskUserQuestions } from '../askUserQuestionFallbackResolution';
+import { configureRequestUserInputResumption } from '../requestUserInputResumption';
 
 const HUMAN = { inputType: 'user' };
 const user = { type: 'user_message' };
@@ -141,12 +146,11 @@ describe('supersedeOpenQuestions', () => {
     });
     expect(setSessionPendingPrompt).toHaveBeenCalledWith(sid, false);
 
-    const sendMessageHandler = vi.fn();
-    registerAskUserQuestionAnswerHandler({ sendMessageHandler } as any);
+    registerAskUserQuestionAnswerHandler();
     const answer = h.handlers.get('claude-code:answer-question')!;
     const response = await answer({}, { questionId: 'toolu_q1', answers: { Q: 'A' }, sessionId: sid });
     expect(response.success).toBe(false);
-    expect(sendMessageHandler).not.toHaveBeenCalled();
+    expect(h.queueCreate).not.toHaveBeenCalled();
   });
 
   it('refuses a late answer after a restart from the durable terminal row', async () => {
@@ -155,16 +159,27 @@ describe('supersedeOpenQuestions', () => {
     // Restart: the in-memory terminalized set and the reservation store are gone.
     clearTerminalizedAskUserQuestions(sid);
     h.reservations.clear();
+    // With no live handler the answer resumes the session through the queue.
+    configureRequestUserInputResumption({
+      drive: vi.fn(async () => ({ kind: 'deferred' as const, reason: 'session-busy' as const })),
+      publish: vi.fn(async () => {}),
+    });
 
-    const sendMessageHandler = vi.fn();
-    registerAskUserQuestionAnswerHandler({ sendMessageHandler } as any);
+    registerAskUserQuestionAnswerHandler();
     const answer = h.handlers.get('claude-code:answer-question')!;
 
     const late = await answer({}, { questionId: 'toolu_q1', answers: { Q: 'A' }, sessionId: sid });
     expect(late).toEqual({ success: false, error: 'Question already answered' });
+    expect(h.queueCreate).not.toHaveBeenCalled();
     // A question with no terminal row still takes the #1116 resume path.
     const open = await answer({}, { questionId: 'toolu_q2', answers: { Q: 'A' }, sessionId: sid });
     expect(open).toEqual({ success: true });
+    expect(h.queueCreate).toHaveBeenCalledTimes(1);
+    expect(h.queueCreate).toHaveBeenCalledWith(expect.objectContaining({
+      id: codexQuestionRecoveryId(sid, 'toolu_q2'),
+      prompt: '[Resuming after answering a question]\n\nQ: A',
+      documentContext: { promptOrigin: 'interactive-question' },
+    }));
   });
 
   it('lets a live CLI waiter write the only terminal row', async () => {
