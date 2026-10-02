@@ -6,6 +6,7 @@ import { AISessionsRepository } from "@nimbalyst/runtime/storage/repositories/AI
 import { getSessionStateManager } from "@nimbalyst/runtime/ai/server/SessionStateManager";
 import { toMillis } from "../../utils/timestampUtils";
 import { buildInteractivePromptToolResultContent } from "../../mcp/tools/interactivePromptTranscript";
+import { hasLiveInteractivePrompt } from "../../mcp/tools/interactivePromptLiveness";
 import { getQueuedPromptsStore } from "../RepositoryManager";
 import type { CreateQueuedPromptInput, QueuedPrompt } from "../PGLiteQueuedPromptsStore";
 import type { DriveOutcome } from "./QueueDriveService";
@@ -237,6 +238,7 @@ export type PromptAnswerOutcome = { success: true } | { success: false; error: s
 
 const ALREADY_ANSWERED = "This form was already answered.";
 const ON_ITS_WAY = "This answer is already on its way to the session.";
+const OTHER_WAITING = "Another question in this session is waiting for your answer. Answer that one first.";
 const rejected = (error: string): PromptAnswerOutcome => ({ success: false, error });
 const reasonOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -278,6 +280,7 @@ export type PromptAnswerStep =
   | "on-its-way"
   | "withdraw"
   | "cancel"
+  | "other-waiting"
   | "not-configured"
   | "enqueue";
 
@@ -292,6 +295,8 @@ export function planPromptAnswer(input: {
   processStart?: number;
   /** When the last turn of the session ended in this process. */
   turnEndedAt?: number;
+  /** Another interactive prompt of the session is blocking a turn right now. */
+  otherPromptWaiting?: boolean;
 }): PromptAnswerStep {
   const { facts, receiptStatus } = input;
   if (facts.hasToolResult) return "already-answered";
@@ -307,6 +312,9 @@ export function planPromptAnswer(input: {
     && !isToolUseFromEndedTurn(facts, input.turnEndedAt)
   ) return "current";
   if (input.cancelled) return "cancel";
+  // The session counts as free while a form waits: a resume turn would start
+  // at once and end that form's turn, leaving it open without a result.
+  if (input.otherPromptWaiting) return "other-waiting";
   if (!input.configured) return "not-configured";
   return "enqueue";
 }
@@ -492,6 +500,7 @@ async function applyPromptAnswer(
     abandoned: isPromptAbandoned(sessionId, toolUseId),
     configured: !!host && !!workspacePath,
     turnEndedAt: turnEndedAt.get(sessionId),
+    otherPromptWaiting: hasLiveInteractivePrompt(sessionId),
   });
   console.info(`[PromptAnswer] ${step}: sessionId=${sessionId}, toolUseId=${toolUseId}, attempts=${attempts}`);
 
@@ -538,6 +547,8 @@ async function applyPromptAnswer(
       }
       await input.writeResponseRow();
       return { success: true };
+    case "other-waiting":
+      return rejected(OTHER_WAITING);
     case "not-configured":
       return rejected("The answer could not be queued: resuming this session is not available.");
     case "enqueue": {

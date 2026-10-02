@@ -207,7 +207,8 @@ export function registerSessionPromptResponseHandler(): void {
                 promptId: canonicalPromptId,
               });
               TrayManager.getInstance().onPromptResolved(sessionId);
-              void setSessionPendingPrompt(sessionId, false);
+              // Another form of the session may still wait for an answer.
+              if (!hasLiveInteractivePrompt(sessionId)) void setSessionPendingPrompt(sessionId, false);
             }
             return late;
           }
