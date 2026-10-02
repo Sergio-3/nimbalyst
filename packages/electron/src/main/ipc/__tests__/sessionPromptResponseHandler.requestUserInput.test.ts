@@ -135,6 +135,7 @@ const A = { farbe: { type: "singleSelect", selectedId: "rot" } };
 const B = { farbe: { type: "singleSelect", selectedId: "blau" } };
 const ALREADY_ANSWERED = "This form was already answered.";
 const ON_ITS_WAY = "This answer is already on its way to the session.";
+const OTHER_WAITING = "Another question in this session is waiting for your answer. Answer that one first.";
 const receiptId = (attempt: number) => promptAnswerReceiptId(SESSION, "toolu_X", attempt);
 const beforeThisProcess = () => new Date(performance.timeOrigin - 60_000);
 
@@ -476,6 +477,42 @@ describe("PromptForUserInput answer to a call that is gone", () => {
     expect(queueStore.create.mock.calls[0][0].prompt).not.toMatch(/because the connection dropped/);
   });
 
+  // The session reports itself free while a form waits, so a resume turn
+  // started at once and ended the live form's turn: that form never got a
+  // result and stayed open for good.
+  it("holds a late answer back while another form of the session waits", async () => {
+    const other = openWaiter("toolu_Y");
+    await vi.waitFor(() => expect(ipcMain.listenerCount(`request-user-input-response:${SESSION}:toolu_Y`)).toBe(1));
+    mocks.setPendingPrompt.mockClear();
+    try {
+      expect(await submit(A)).toEqual({ success: false, error: OTHER_WAITING });
+      expect(queueStore.create).not.toHaveBeenCalled();
+      expect(responses()).toEqual([]);
+      expect(mocks.senderSend).not.toHaveBeenCalledWith("ai:requestUserInputResolved", expect.anything());
+      expect(mocks.setPendingPrompt).not.toHaveBeenCalledWith(SESSION, false);
+    } finally {
+      // A failing run must not leave the other form waiting for the next test.
+      ipcMain.emit(`request-user-input-response:${SESSION}:toolu_Y`, {}, { answers: B });
+      await other;
+    }
+    expect(await submit(A)).toMatchObject({ success: true });
+    expect(queueStore.create.mock.calls.map(([row]) => row.id)).toEqual([receiptId(1)]);
+  });
+
+  it("closes a dead form on cancel while another form waits, keeping the pending bit", async () => {
+    const other = openWaiter("toolu_Y");
+    await vi.waitFor(() => expect(ipcMain.listenerCount(`request-user-input-response:${SESSION}:toolu_Y`)).toBe(1));
+    mocks.setPendingPrompt.mockClear();
+    try {
+      expect(await cancel()).toMatchObject({ success: true });
+      expect(toolResults()).toEqual([expect.objectContaining({ tool_use_id: "toolu_X" })]);
+      expect(mocks.setPendingPrompt).not.toHaveBeenCalledWith(SESSION, false);
+    } finally {
+      ipcMain.emit(`request-user-input-response:${SESSION}:toolu_Y`, {}, { cancelled: true });
+      await other;
+    }
+  });
+
   it("says the answer arrives late only when the session moved on", async () => {
     await submit(A);
     expect(queueStore.create).toHaveBeenCalledTimes(1);
@@ -542,3 +579,4 @@ describe("PromptForUserInput answer while its call lives or starts", () => {
     expect(queueStore.create).not.toHaveBeenCalled();
   });
 });
+
