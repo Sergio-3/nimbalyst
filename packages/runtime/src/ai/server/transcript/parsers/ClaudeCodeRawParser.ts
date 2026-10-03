@@ -205,6 +205,8 @@ export class ClaudeCodeRawParser implements IRawMessageParser {
         // assistant chunk with the model that produced it.
         const turnModel: string | undefined =
           typeof parsed.message.model === 'string' ? parsed.message.model : undefined;
+        // A sub-agent's own text and thinking belong to its card, like its tool calls.
+        const textSubagentId = parentToolUseId && context.hasSubagent(parentToolUseId) ? parentToolUseId : undefined;
 
         if (Array.isArray(parsed.message.content)) {
           for (const block of parsed.message.content) {
@@ -224,6 +226,7 @@ export class ClaudeCodeRawParser implements IRawMessageParser {
                 text: block.text,
                 createdAt: msg.createdAt,
                 ...(turnModel ? { model: turnModel } : {}),
+                ...(textSubagentId ? { subagentId: textSubagentId } : {}),
               });
             } else if (block.type === 'thinking' && (block.thinking || block.text)) {
               // Extended-thinking output. Persist as an assistant_message
@@ -244,6 +247,7 @@ export class ClaudeCodeRawParser implements IRawMessageParser {
                 thinking: thinkingText,
                 ...(thinkingSignature ? { thinkingSignature } : {}),
                 ...(turnModel ? { model: turnModel } : {}),
+                ...(textSubagentId ? { subagentId: textSubagentId } : {}),
                 createdAt: msg.createdAt,
               });
             } else if (block.type === 'tool_use') {

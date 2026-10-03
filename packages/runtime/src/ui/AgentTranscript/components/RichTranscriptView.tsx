@@ -1856,9 +1856,28 @@ export const RichTranscriptView = React.forwardRef<
     return null;
   };
 
+  // A sub-agent's own text or thinking inside its card's child list.
+  const renderSubagentNote = (message: TranscriptViewMessage, index: number, depth: number): JSX.Element | null => {
+    if (message.type !== 'assistant_message') return null;
+    const text = message.text?.trim();
+    if (!text) {
+      if (!settings.showThinking || !message.thinking?.trim()) return null;
+      return (
+        <div key={`note-${depth}-${index}`} className="rich-transcript-bundle-thinking mb-2" style={{ marginLeft: '1rem' }}>
+          <ThinkingBlock thinking={message.thinking} />
+        </div>
+      );
+    }
+    return (
+      <div key={`note-${depth}-${index}`} className="rich-transcript-subagent-text mb-2 text-sm text-[var(--nim-text-muted)]" style={{ marginLeft: '1rem' }}>
+        <MarkdownRenderer content={text} isUser={false} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
+      </div>
+    );
+  };
+
   // Recursive tool rendering helper
   const renderToolCard = (toolMsg: TranscriptViewMessage, toolIndex: number, depth: number = 0, inBundle: boolean = false): JSX.Element | null => {
-    if (!toolMsg.toolCall) return null;
+    if (!toolMsg.toolCall) return depth > 0 ? renderSubagentNote(toolMsg, toolIndex, depth) : null;
 
     // Hide Task tool calls that were cancelled as siblings of a parallel spawn.
     // These get exactly "<tool_use_error>Sibling tool call errored</tool_use_error>"
@@ -2295,13 +2314,13 @@ export const RichTranscriptView = React.forwardRef<
     );
   };
 
-  // A sub-agent's child list: only tool calls render there, so its own text
-  // never separates a bundle.
+  // A sub-agent's child list: its own text separates its steps, as the
+  // lead's text does at the top level.
   const renderToolList = (toolMessages: TranscriptViewMessage[], depth: number): (JSX.Element | null)[] => {
     if (!groupToolCallsEnabled) {
       return toolMessages.map((childMsg, childIdx) => renderToolCard(childMsg, childIdx, depth));
     }
-    return groupToolCalls(toolMessages, { textSeparates: false, showThinking: settings.showThinking }).map((group) =>
+    return groupToolCalls(toolMessages, { textSeparates: true, showThinking: settings.showThinking }).map((group) =>
       group.kind === 'bundle'
         ? renderToolBundle(
           bundleIdFor(toolMessages[group.indices[0]]),

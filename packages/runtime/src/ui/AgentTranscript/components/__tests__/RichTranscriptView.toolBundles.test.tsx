@@ -82,11 +82,11 @@ function subagentRow(childEvents: TranscriptViewMessage[] = [
   };
 }
 
-function settings(collapseTools: boolean): TranscriptSettings {
-  return { showToolCalls: true, showThinking: true, compactMode: false, collapseTools, showSessionInit: false };
+function settings(collapseTools: boolean, showThinking = true): TranscriptSettings {
+  return { showToolCalls: true, showThinking, compactMode: false, collapseTools, showSessionInit: false };
 }
 
-function renderTranscript(messages: TranscriptViewMessage[], collapseTools: boolean) {
+function renderTranscript(messages: TranscriptViewMessage[], collapseTools: boolean, showThinking = true) {
   return render(
     <RichTranscriptView
       sessionId={`bundles-${nextId}`}
@@ -94,7 +94,7 @@ function renderTranscript(messages: TranscriptViewMessage[], collapseTools: bool
       messages={messages}
       provider="claude-code"
       workspacePath="/workspace"
-      settings={settings(collapseTools)}
+      settings={settings(collapseTools, showThinking)}
       persistScrollState={false}
     />,
   );
@@ -175,6 +175,24 @@ describe('RichTranscriptView tool-call bundles', () => {
     fireEvent.click(container.querySelector('.rich-transcript-tool-card.sub-agent .rich-transcript-tool-button')!);
     const children = container.querySelector('.rich-transcript-subagent-children');
     expect(children!.querySelectorAll('.rich-transcript-tool-bundle')).toHaveLength(1);
+  });
+
+  it.each([
+    [true, true], [false, true], [true, false], [false, false],
+  ])('shows a sub-agent\'s own text and thinking in its opened card (grouping %s, thinking %s)', (grouping, showThinking) => {
+    const row = subagentRow([tool('Read', { file_path: '/workspace/a.ts' }), assistant('Now the code.'), thinking('next step'), tool('Grep', { pattern: 'y' })]);
+    const { container } = renderTranscript([user('Delegate'), row, assistant('Agent finished.')], grouping, showThinking);
+    if (grouping) fireEvent.click(container.querySelector('.rich-transcript-tool-card.sub-agent .rich-transcript-tool-button')!);
+
+    const children = container.querySelector('.rich-transcript-subagent-children')!;
+    expect(children.querySelector('.rich-transcript-subagent-text')!.textContent).toContain('Now the code.');
+    // The text separates the child's steps; with grouping off every card stands alone.
+    expect(children.querySelectorAll('.rich-transcript-tool-bundle')).toHaveLength(grouping ? 2 : 0);
+    // The child's thinking left the lead's reply; it shows here or, when hidden, nowhere.
+    children.querySelectorAll('.rich-transcript-tool-bundle-button').forEach(button => fireEvent.click(button));
+    const thoughts = [...children.querySelectorAll('.rich-transcript-thinking')].map(el => el.textContent ?? '');
+    expect(thoughts.some(t => t.includes('next step'))).toBe(showThinking);
+    if (!showThinking) expect(container.textContent).not.toContain('next step');
   });
 
   it('opens sub-agents by default when grouping is off', () => {

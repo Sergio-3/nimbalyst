@@ -87,16 +87,20 @@ export class TranscriptWriter {
       thinking?: string;
       thinkingSignature?: string;
       model?: string;
+      /** The sub-agent that wrote this; absent for the lead agent. */
+      subagentId?: string | null;
     },
   ): Promise<TranscriptEvent> {
     const mode = options?.mode ?? 'agent';
+    const subagentId = options?.subagentId ?? null;
     const hasExtras =
       options?.thinking !== undefined ||
       options?.thinkingSignature !== undefined ||
       options?.model !== undefined;
 
     // Coalesce streaming chunks: if the previous event in this session is
-    // also an assistant_message with the same mode/subagent, append to it
+    // also an assistant_message with the same mode and author (lead or the
+    // same sub-agent), append to it
     // rather than inserting a new row. ACP and similar streaming protocols
     // emit one chunk per token; without this we'd persist thousands of
     // single-token events per session.
@@ -108,7 +112,7 @@ export class TranscriptWriter {
     if (
       last &&
       last.eventType === 'assistant_message' &&
-      last.subagentId === null &&
+      last.subagentId === subagentId &&
       last.mode === mode
     ) {
       const mergedText = (last.searchableText ?? '') + text;
@@ -132,6 +136,7 @@ export class TranscriptWriter {
       searchableText: text,
       searchable: true,
       payload: payload as unknown as Record<string, unknown>,
+      subagentId,
       createdAt: options?.createdAt,
     });
   }

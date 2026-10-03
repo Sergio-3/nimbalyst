@@ -105,6 +105,25 @@ describe('TranscriptWriter', () => {
       expect(b.id).not.toBe(a.id);
     });
 
+    it('never coalesces across the lead and a sub-agent, only within one', async () => {
+      const lead = await writer.appendAssistantMessage('session-1', 'Lead.');
+      const child = await writer.appendAssistantMessage('session-1', 'Child.', { subagentId: 'agent-1' });
+      const more = await writer.appendAssistantMessage('session-1', ' More.', { subagentId: 'agent-1' });
+      const other = await writer.appendAssistantMessage('session-1', 'Other.', { subagentId: 'agent-2' });
+      const back = await writer.appendAssistantMessage('session-1', 'Lead again.');
+
+      expect(new Set([lead.id, child.id, other.id, back.id]).size).toBe(4);
+      expect(more.id).toBe(child.id);
+      expect(child.subagentId).toBe('agent-1');
+      const events = await store.getSessionEvents('session-1');
+      expect(events.map((e) => [e.subagentId, e.searchableText])).toEqual([
+        [null, 'Lead.'],
+        ['agent-1', 'Child. More.'],
+        ['agent-2', 'Other.'],
+        [null, 'Lead again.'],
+      ]);
+    });
+
     it('coalesces across writer instances by reading the tail from the store', async () => {
       const first = await writer.appendAssistantMessage('session-1', 'Hello');
 

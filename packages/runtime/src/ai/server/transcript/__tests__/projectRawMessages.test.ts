@@ -13,6 +13,7 @@ import {
 } from '../projectRawMessages';
 import type { RawMessage } from '../TranscriptTransformer';
 import { truncateContentForSync } from '../../../../sync/syncContentTruncator';
+import { LEAD_TEXT, SUBAGENT_TEXTS, subagentTextRows } from './fixtures/subagentTextRows';
 
 const SESSION_ID = 'test-session';
 
@@ -498,6 +499,19 @@ describe('projectRawMessagesToViewMessages', () => {
       expect(result.commitHash).toBe('0b02b2301eecf073c716f8f0da43d458a611c568');
       expect(result.error).toBeUndefined();
     });
+  });
+
+  it('keeps a background sub-agent\'s text out of the lead\'s answer and in its card', async () => {
+    // Real row shapes (see the fixture): the lead's answer is followed by the
+    // sub-agent's sentences, each carrying parent_tool_use_id and a model.
+    const vms = await projectRawMessagesToViewMessages(subagentTextRows(SESSION_ID), 'claude-code');
+
+    const topLevelText = vms.filter((m) => m.type === 'assistant_message' && m.text).map((m) => m.text);
+    expect(topLevelText).toEqual([LEAD_TEXT]);
+
+    const agent = vms.find((m) => m.type === 'subagent');
+    const childText = agent?.subagent?.childEvents.filter((m) => m.type === 'assistant_message' && m.text).map((m) => m.text);
+    expect(childText).toEqual(SUBAGENT_TEXTS);
   });
 
   it('carries prompt provenance from the raw row onto user messages', async () => {

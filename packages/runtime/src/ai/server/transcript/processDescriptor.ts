@@ -93,6 +93,7 @@ export async function processDescriptor(
         thinking: desc.thinking,
         thinkingSignature: desc.thinkingSignature,
         model: desc.model,
+        subagentId: desc.subagentId,
       });
     }
 

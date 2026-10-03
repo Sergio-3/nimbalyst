@@ -804,6 +804,33 @@ describe('ClaudeCodeRawParser', () => {
       });
     });
 
+    it('files a sub-agent\'s text and thinking under its sub-agent, not the lead', async () => {
+      const parser = new ClaudeCodeRawParser();
+      const chunk = (parent: string) => makeRawMessage({
+        content: JSON.stringify({
+          type: 'assistant',
+          parent_tool_use_id: parent,
+          message: {
+            id: `msg_${parent}`,
+            role: 'assistant',
+            model: 'claude-opus-4-7',
+            content: [
+              { type: 'thinking', thinking: 'Next file.' },
+              { type: 'text', text: 'Now the code.' },
+            ],
+          },
+        }),
+      });
+      const context = makeContext({ hasSubagent: (id) => id === 'toolu_agent' });
+
+      const known = await parser.parseMessage(chunk('toolu_agent'), context);
+      expect(known.map((d) => (d as { subagentId?: string | null }).subagentId)).toEqual(['toolu_agent', 'toolu_agent']);
+
+      // A parent that is not a known sub-agent leaves the chunk on the lead.
+      const unknown = await new ClaudeCodeRawParser().parseMessage(chunk('toolu_other'), context);
+      expect(unknown.map((d) => (d as { subagentId?: string | null }).subagentId ?? null)).toEqual([null, null]);
+    });
+
     it('summarises deferred_tools_delta attachment entries as a status system_message', async () => {
       const parser = new ClaudeCodeRawParser();
       const msg = makeRawMessage({
