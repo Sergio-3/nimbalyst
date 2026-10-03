@@ -118,6 +118,10 @@ interface AgentTranscriptPanelProps {
   loadToolCallDiffs?: (toolCallItemId: string, toolCallTimestamp?: number) => Promise<ToolCallDiffLoadResult>;
   /** Optional: merged teammate/worker statuses to drive transcript status UI */
   currentTeammates?: Array<{ agentId: string; status: 'running' | 'completed' | 'errored' | 'idle' }>;
+  /** Optional: the lead turn runs on in the background drain (see RichTranscriptView). */
+  backgroundDrainActive?: boolean;
+  /** Optional: a task is still running (see RichTranscriptView). */
+  hasRunningTasks?: boolean;
   /** Optional: noun used in waiting text when teammates/workers are still running */
   waitingForNoun?: string;
   /** Optional: background tasks the session is draining after the lead turn ended */
@@ -172,6 +176,8 @@ const AgentTranscriptPanelComponent = React.forwardRef<
   canEmbedFile,
   loadToolCallDiffs,
   currentTeammates,
+  backgroundDrainActive,
+  hasRunningTasks,
   waitingForNoun,
   backgroundTasks,
   currentPhase,
@@ -337,6 +343,8 @@ const AgentTranscriptPanelComponent = React.forwardRef<
           onCompact={onCompact}
           promptAdditions={promptAdditions}
           currentTeammates={currentTeammates ?? sessionData.metadata?.currentTeammates as Array<{ agentId: string; status: 'running' | 'completed' | 'errored' | 'idle' }> | undefined}
+          backgroundDrainActive={backgroundDrainActive}
+          hasRunningTasks={hasRunningTasks}
           waitingForNoun={waitingForNoun}
           backgroundTasks={backgroundTasks}
           appStartTime={appStartTime}
@@ -606,6 +614,13 @@ export const AgentTranscriptPanel = React.memo(
         prev: prevProps.backgroundTasks?.length ?? 0,
         next: nextProps.backgroundTasks?.length ?? 0,
       });
+      return false;
+    }
+
+    // Drain and task state decide whether a sub-agent row may read Stopped.
+    if (prevProps.backgroundDrainActive !== nextProps.backgroundDrainActive
+      || prevProps.hasRunningTasks !== nextProps.hasRunningTasks) {
+      logPanelMemoDiff(nextProps.sessionId, 'backgroundDrainActive/hasRunningTasks');
       return false;
     }
 

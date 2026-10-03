@@ -200,6 +200,12 @@ export const SETTINGS_REGISTRY = {
     { store: 'ai-settings', path: 'chatShowToolCalls' },
     true,
   ),
+  /** "Compact Transcript": fold the agent's working steps in the chat transcript into expandable rows. */
+  'ai.chatGroupToolCalls': setting(
+    z.boolean(),
+    { store: 'ai-settings', path: 'chatGroupToolCalls' },
+    true,
+  ),
   'ai.aiDebugLogging': setting(
     z.boolean(),
     { store: 'ai-settings', path: 'aiDebugLogging' },

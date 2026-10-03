@@ -49,6 +49,8 @@ export function AgentFeaturesPanel() {
   ) as [boolean, (value: boolean) => void];
   const [showCommitPanel, setShowCommitPanel] = useAtom(settingAtom('agent.sidebar.showCommitPanel'));
 
+  const [chatGroupToolCalls, setChatGroupToolCalls] = useAtom(settingAtom('ai.chatGroupToolCalls'));
+
   const [aiDebugSettings] = useAtom(aiDebugSettingsAtom);
   const [, updateAIDebugSettings] = useAtom(setAIDebugSettingsAtom);
   const { showToolCalls, chatShowToolCalls, aiDebugLogging, showPromptAdditions } = aiDebugSettings;
@@ -487,6 +489,15 @@ export function AgentFeaturesPanel() {
           onChange={(checked) => updateAIDebugSettings({ chatShowToolCalls: checked })}
           name="Show Tool Calls in Chat"
           description="Display tool call rows in the AI chat view. Turn off to hide tool activity and see only the conversational messages."
+        />
+
+        <SettingsToggle
+          checked={chatGroupToolCalls}
+          onChange={setChatGroupToolCalls}
+          name="Compact Transcript"
+          description="Fold the agent's working steps (tool calls, file diffs, thinking, status notices and updates from other sessions) into one expandable row, such as &quot;5 tool calls · 3 commands, 2 file edits&quot;, and show each sub-agent as one line with its status. The agent's replies, your messages, questions, approvals and anything else waiting on you, and charts or images the agent shows you stay visible."
+          disabled={!chatShowToolCalls}
+          testId="chat-group-tool-calls-setting"
         />
       </div>
 

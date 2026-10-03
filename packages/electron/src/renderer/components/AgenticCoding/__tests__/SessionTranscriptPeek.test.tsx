@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionMeta } from '@nimbalyst/runtime';
 import { sessionRegistryAtom } from '../../../store/atoms/sessions';
 import { transcriptEventSignalAtom } from '../../../store/atoms/sessionTranscript';
+import { settingAtom } from '../../../store/atoms/settingAtomFamily';
 import { SessionTranscriptPeek } from '../SessionTranscriptPeek';
 
 vi.mock('@floating-ui/react', () => ({
@@ -34,15 +35,18 @@ vi.mock('@nimbalyst/runtime/ui/AgentTranscript/components/RichTranscriptView', (
     sessionId,
     messages,
     persistScrollState,
+    settings,
   }: {
     sessionId: string;
     messages: Array<{ content?: string }>;
     persistScrollState: boolean;
+    settings: { collapseTools: boolean };
   }) => (
     <div
       data-testid="mock-rich-transcript"
       data-session-id={sessionId}
       data-persist-scroll-state={String(persistScrollState)}
+      data-collapse-tools={String(settings.collapseTools)}
     >
       {messages.map((message) => message.content).join('|')}
     </div>
@@ -131,6 +135,25 @@ describe('SessionTranscriptPeek', () => {
     });
     expect(getTailMessages).toHaveBeenCalledTimes(2);
     expect(screen.getByTestId('mock-rich-transcript').textContent).toBe('updated response');
+  });
+
+  it.each([true, false])('groups tool calls only when ai.chatGroupToolCalls is %s', async (value) => {
+    const store = createStore();
+    const meta = session('grouping');
+    store.set(sessionRegistryAtom, new Map([[meta.id, meta]]));
+    await store.set(settingAtom('ai.chatGroupToolCalls'), value);
+    getTailMessages.mockResolvedValue([{ content: 'tail' }]);
+
+    render(
+      <JotaiProvider store={store}>
+        <SessionTranscriptPeek sessionId={meta.id} reference={anchor} onClose={vi.fn()} />
+      </JotaiProvider>,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId('mock-rich-transcript').getAttribute('data-collapse-tools')).toBe(String(value));
   });
 
   it('previews the most recently updated child for a workstream card', async () => {

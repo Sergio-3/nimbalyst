@@ -2,6 +2,8 @@ import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TranscriptViewMessage } from '../../../../ai/server/transcript/TranscriptProjector';
+import type { RawMessage } from '../../../../ai/server/transcript/TranscriptTransformer';
+import { projectRawMessagesToViewMessages } from '../../../../ai/server/transcript/projectRawMessages';
 import { RichTranscriptView } from '../RichTranscriptView';
 
 const vlistState = vi.hoisted(() => ({
@@ -192,6 +194,74 @@ describe('pending question navigation', () => {
     expect(vlistState.scrollToIndex).not.toHaveBeenCalledWith(expect.any(Number), { align: 'end' });
     expect(container.querySelectorAll('[data-transcript-tool-id="question-1"]')).toHaveLength(1);
     expect(vlistState.scrollBy).toHaveBeenCalled();
+  });
+});
+
+describe('a question a sub-agent asks', () => {
+  // Raw rows as the Claude Agent SDK writes them: the sub-agent's tool call
+  // carries `parent_tool_use_id`, so the projector files it under the card.
+  let rawId = 0;
+  const row = (direction: 'input' | 'output', content: unknown): RawMessage => ({
+    id: ++rawId, sessionId: 'sub-questions', source: 'claude-code', direction,
+    content: JSON.stringify(content), createdAt: new Date(1_784_648_445_000 + rawId * 1000),
+  });
+  const prompt = (text: string) => row('input', { prompt: text });
+  const toolUse = (id: string, name: string, input: unknown, parent?: string) => row('output', {
+    type: 'assistant', ...(parent ? { parent_tool_use_id: parent } : {}),
+    message: { id: `msg-${id}`, content: [{ type: 'tool_use', id, name, input }] },
+  });
+  const toolResult = (id: string, content: string, parent?: string) => row('input', {
+    type: 'user', ...(parent ? { parent_tool_use_id: parent } : {}),
+    message: { content: [{ type: 'tool_result', tool_use_id: id, content }] },
+  });
+  const say = (id: string, text: string) => row('output', { type: 'assistant', message: { id, content: [{ type: 'text', text }] } });
+  const ask = { questions: [{ header: 'Next', question: 'Continue?', options: [{ label: 'Yes', description: 'Continue' }] }] };
+  const spawn = (id: string) => toolUse(id, 'Agent', { prompt: 'Ask the user', description: 'Ask', subagent_type: 'general-purpose' });
+
+  const grouped = { showToolCalls: true, showThinking: true, compactMode: false, collapseTools: true, showSessionInit: false };
+  const view = (messages: TranscriptViewMessage[]) => (
+    <RichTranscriptView sessionId="sub-questions" sessionStatus="running" messages={messages} provider="claude-code"
+      settings={grouped} persistScrollState={false} backgroundDrainActive={false} hasRunningTasks={false} />
+  );
+
+  beforeEach(() => {
+    vlistState.scrollToIndex.mockReset();
+    vi.stubGlobal('CSS', { highlights: { delete: vi.fn(), set: vi.fn() } });
+    vi.stubGlobal('requestAnimationFrame', () => 1);
+    vi.stubGlobal('cancelAnimationFrame', () => undefined);
+  });
+
+  it('opens the sub-agent row, offers the jump, and stops Thinking', async () => {
+    const messages = await projectRawMessagesToViewMessages([
+      prompt('Go'),
+      spawn('agent-1'),
+      toolUse('q-child', 'mcp__nimbalyst__AskUserQuestion', ask, 'agent-1'),
+    ], 'claude-code');
+    expect(messages.map(m => m.type)).toEqual(['user_message', 'subagent']);
+
+    const { container } = render(view(messages));
+    screen.getByTestId('ask-user-question-submit');
+    expect(container.querySelector('[data-transcript-tool-id="q-child"]')).not.toBeNull();
+    expect(container.querySelector('.rich-transcript-waiting')).toBeNull();
+    fireEvent.click(screen.getByLabelText('Jump to question'));
+    expect(vlistState.scrollToIndex).toHaveBeenCalledWith(1, { align: 'start' });
+  });
+
+  it('keeps the row of a top-level question behind a sub-agent that asked one', async () => {
+    const messages = await projectRawMessagesToViewMessages([
+      prompt('Go'),
+      spawn('agent-1'),
+      toolUse('q-child', 'mcp__nimbalyst__AskUserQuestion', ask, 'agent-1'),
+      toolResult('q-child', JSON.stringify({ answers: { 'Continue?': 'Yes' } }), 'agent-1'),
+      toolResult('agent-1', 'Asked and done.'),
+      toolUse('q-top', 'mcp__nimbalyst__AskUserQuestion', ask),
+      say('m-after', 'Waiting for you.'),
+    ], 'claude-code');
+    expect(messages.map(m => m.type)).toEqual(['user_message', 'subagent', 'tool_call', 'assistant_message']);
+
+    render(view(messages));
+    fireEvent.click(screen.getByLabelText('Jump to question'));
+    expect(vlistState.scrollToIndex).toHaveBeenCalledWith(3, { align: 'start' });
   });
 });
 

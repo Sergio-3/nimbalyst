@@ -3,9 +3,9 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { VList, type VListHandle, type CacheSnapshot } from 'virtua';
 import type { TranscriptViewMessage, SessionData } from '../../../ai/server/types';
 import type { ToolCallDiffLoadResult } from '../../../ai/server/transcript';
-import { isInteractiveWidgetTool, partitionUnansweredQuestions, stripMcpPrefix } from '../../../ai/server/interactivePromptTools';
+import { isInteractiveWidgetTool, stripMcpPrefix } from '../../../ai/server/interactivePromptTools';
 import type { TranscriptSettings } from '../types';
-import { MessageSegment } from './MessageSegment';
+import { MessageSegment, ThinkingBlock } from './MessageSegment';
 import { MarkdownRenderer, type TranscriptFileLocation } from './MarkdownRenderer';
 import { ProviderIcon } from '../../icons/ProviderIcons';
 import { MaterialSymbol } from '../../icons/MaterialSymbol';
@@ -17,6 +17,17 @@ import { EditToolResultCard } from './EditToolResultCard';
 import { TranscriptSearchBar } from './TranscriptSearchBar';
 import { formatToolDisplayName } from '../utils/toolNameFormatter';
 import { isToolLikeMessage } from '../utils/messageTypeHelpers';
+import {
+  bundleRole,
+  formatToolCallBundleSummary,
+  groupToolCalls,
+  isCancelledSiblingTask,
+  summarizeBundleMembers,
+  type ToolCallBundleSummary,
+} from '../utils/toolCallBundles';
+import { bundleIdFor, planTranscriptRows, turnStartIndex, type TranscriptRowPlan } from '../utils/transcriptRowPlan';
+import { subagentStatus, type SubagentStatus } from '../utils/subagentStatus';
+import { partitionTranscriptQuestions } from '../utils/transcriptQuestions';
 import { getCustomToolWidget, ToolWidgetErrorBoundary, type ToolCallDiffResult } from './CustomToolWidgets';
 import { useTranscriptToolWidgetRegistryVersion } from '../contributions';
 import { ToolCallChanges } from './ToolCallChanges';
@@ -29,8 +40,16 @@ import { AttachmentStagingDeniedCard } from './AttachmentStagingDeniedCard';
 import { useElapsedTimeRef } from './CustomToolWidgets/useElapsedTime';
 
 // Per-session VList cache - survives component remounts so returning to a session
-// doesn't re-measure all items from scratch
+// doesn't re-measure all items from scratch. Keyed by session and layout: row
+// heights measured with bundles closed or in compact mode don't fit another layout.
 const vlistCacheMap = new Map<string, CacheSnapshot>();
+
+// Per-session open/closed choices for tool cards, sub-agent rows and bundles.
+// Kept across remounts so the cached heights above still match the rows.
+const expansionBySession = new Map<string, ReadonlyMap<string, boolean>>();
+// Child questions that already opened their sub-agent row once, per session.
+const revealedChildQuestionsBySession = new Map<string, Set<string>>();
+const NO_CHOICES: ReadonlyMap<string, boolean> = new Map();
 
 function summarizeRenderTeammates(
   teammates: Array<{ agentId: string; status: 'running' | 'completed' | 'errored' | 'idle' }> | undefined
@@ -386,7 +405,9 @@ const REASON_TYPE_LABELS: Partial<Record<string, string>> = {
 
 const PermissionDeniedCard: React.FC<{
   message: TranscriptViewMessage;
-}> = ({ message }) => {
+  /** Inside a bundle: no indent of its own. */
+  inBundle?: boolean;
+}> = ({ message, inBundle = false }) => {
   const payload = message.systemMessage;
   const toolName = payload?.deniedToolName ?? 'unknown tool';
   const reason = payload?.deniedReason;
@@ -396,7 +417,7 @@ const PermissionDeniedCard: React.FC<{
   return (
     <div
       data-testid="permission-denied-card"
-      className="permission-denied-card ml-6 mb-2 rounded-md border border-[var(--nim-error)] bg-[var(--nim-error-bg,rgba(239,68,68,0.08))] px-3 py-2"
+      className={`permission-denied-card ${inBundle ? '' : 'ml-6'} mb-2 rounded-md border border-[var(--nim-error)] bg-[var(--nim-error-bg,rgba(239,68,68,0.08))] px-3 py-2`}
     >
       <div className="flex items-center gap-2 text-xs text-[var(--nim-error)]">
         <MaterialSymbol icon="block" size={14} />
@@ -421,7 +442,9 @@ const PermissionDeniedCard: React.FC<{
 
 const SystemReminderCard: React.FC<{
   message: TranscriptViewMessage;
-}> = ({ message }) => {
+  /** Inside a bundle: no indent of its own. */
+  inBundle?: boolean;
+}> = ({ message, inBundle = false }) => {
   const [isExpanded, setIsExpanded] = useState(false);
 
   const content = (message.text ?? '')
@@ -443,7 +466,7 @@ const SystemReminderCard: React.FC<{
     (reminderKind && REMINDER_KIND_LABELS[reminderKind]) ?? 'System Reminder';
 
   return (
-    <div className="rich-transcript-system-reminder ml-6 mb-2 rounded-md border border-[var(--nim-border)] bg-[var(--nim-bg-tertiary)] px-3 py-2">
+    <div className={`rich-transcript-system-reminder ${inBundle ? '' : 'ml-6'} mb-2 rounded-md border border-[var(--nim-border)] bg-[var(--nim-bg-tertiary)] px-3 py-2`}>
       <button
         type="button"
         onClick={() => setIsExpanded(v => !v)}
@@ -508,6 +531,14 @@ interface RichTranscriptViewProps {
   } | null;
   /** Optional: Current teammates/agents from session metadata, used to show status on spawn cards */
   currentTeammates?: Array<{ agentId: string; status: 'running' | 'completed' | 'errored' | 'idle' }>;
+  /**
+   * Optional: the lead turn was handed to the background drain, which keeps
+   * sub-agents running while the session reads idle. Hosts that pass this and
+   * `hasRunningTasks` let a sub-agent row say Stopped; others never do.
+   */
+  backgroundDrainActive?: boolean;
+  /** Optional: a task (foreground or background) is still running. */
+  hasRunningTasks?: boolean;
   /** Optional: noun used in waiting text when teammates/workers are still running */
   waitingForNoun?: string;
   /** Optional: background tasks the session is draining after the lead turn ended */
@@ -753,6 +784,26 @@ const getTranscriptToolKey = (
   // providerToolCallId for both a parent tool and a derived/echo row at the
   // same depth, which would collide if we keyed by stableId alone.
   return `tool-${depth}-${stableId}-i${fallbackIndex}`;
+};
+
+/** Key of a tool card's open/closed state. Never the tool name, which repeats. */
+const getToolStateKey = (toolMsg: TranscriptViewMessage, fallbackIndex: number): string =>
+  toolMsg.toolCall?.providerToolCallId
+  || toolMsg.subagentId
+  || (Number.isFinite(toolMsg.sequence) && toolMsg.sequence >= 0 ? `seq-${toolMsg.sequence}` : `idx-${fallbackIndex}`);
+
+/** Whether a sub-agent's children (at any depth) include a prompt for the user. */
+const hasInteractiveDescendant = (toolMsg: TranscriptViewMessage): boolean =>
+  (toolMsg.subagent?.childEvents ?? []).some(child =>
+    isInteractiveWidgetTool(child.toolCall?.toolName) || hasInteractiveDescendant(child));
+
+const SUBAGENT_STATUS_LABELS: Record<SubagentStatus, string> = {
+  running: 'Running',
+  idle: 'Idle',
+  done: 'Done',
+  errored: 'Errored',
+  stopped: 'Stopped',
+  denied: 'Denied',
 };
 
 const stableSerialize = (value: unknown): string => {
@@ -1179,9 +1230,35 @@ export const extractEditsFromToolMessage = (message: TranscriptViewMessage): any
 export const RichTranscriptView = React.forwardRef<
   { scrollToMessage: (index: number) => void; scrollToTop: () => void },
   RichTranscriptViewProps
->(({ sessionId, sessionStatus, isProcessing, hasPendingInteractivePrompt, messages, provider, settings: propsSettings, onSettingsChange, showSettings, documentContext, workspacePath, renderEmptyExtra, hideEmptyHelp, readFile, onOpenFile, onOpenSession, onCompact, promptAdditions, currentTeammates, waitingForNoun, backgroundTasks, appStartTime, renderEmbeddedFile, canEmbedFile, loadToolCallDiffs, onSearchBarVisibilityChange, persistScrollState = true }, ref) => {
+>(({ sessionId, sessionStatus, isProcessing, hasPendingInteractivePrompt, messages, provider, settings: propsSettings, onSettingsChange, showSettings, documentContext, workspacePath, renderEmptyExtra, hideEmptyHelp, readFile, onOpenFile, onOpenSession, onCompact, promptAdditions, currentTeammates, backgroundDrainActive, hasRunningTasks, waitingForNoun, backgroundTasks, appStartTime, renderEmbeddedFile, canEmbedFile, loadToolCallDiffs, onSearchBarVisibilityChange, persistScrollState = true }, ref) => {
   const [collapsedMessages, setCollapsedMessages] = useState<Set<number>>(new Set());
-  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
+  // Explicit open/closed choices for tool cards, sub-agent rows and bundles,
+  // keyed by tool id or bundle id; anything without a choice uses its default.
+  // Remembered per session (expansionBySession) except in secondary mounts.
+  const [expansion, setExpansion] = useState(() => ({
+    sessionId,
+    choices: (persistScrollState ? expansionBySession.get(sessionId) : undefined) ?? NO_CHOICES,
+  }));
+  const choices = expansion.sessionId === sessionId
+    ? expansion.choices
+    : (persistScrollState ? expansionBySession.get(sessionId) : undefined) ?? NO_CHOICES;
+  const setExpanded = useCallback((key: string, open: boolean) => {
+    setExpansion(prev => {
+      const base = prev.sessionId === sessionId
+        ? prev.choices
+        : (persistScrollState ? expansionBySession.get(sessionId) : undefined) ?? NO_CHOICES;
+      const next = new Map(base);
+      next.set(key, open);
+      if (persistScrollState) expansionBySession.set(sessionId, next);
+      return { sessionId, choices: next };
+    });
+  }, [sessionId, persistScrollState]);
+  const isExpandedKey = (key: string, defaultOpen = false): boolean => choices.get(key) ?? defaultOpen;
+  // MessageSegment's (unreached) tool rendering still takes the open set.
+  const expandedTools = useMemo(
+    () => new Set([...choices].filter(([, open]) => open).map(([key]) => key)),
+    [choices],
+  );
   const scrollButtonRef = useRef<HTMLDivElement>(null);
   const scrollButtonElementRef = useRef<HTMLButtonElement>(null);
   const [copiedMessageIndex, setCopiedMessageIndex] = useState<number | null>(null);
@@ -1225,6 +1302,15 @@ export const RichTranscriptView = React.forwardRef<
   });
 
   const settings = propsSettings || defaultSettings;
+  // Bundling folds the agent's working steps; with tool calls hidden there is nothing to fold.
+  const groupToolCallsEnabled = settings.collapseTools && settings.showToolCalls;
+  const vlistCacheKey = [
+    sessionId,
+    groupToolCallsEnabled ? 'grouped' : 'flat',
+    settings.compactMode ? 'compact' : 'normal',
+    settings.showThinking ? 'thinking' : 'no-thinking',
+    settings.showToolCalls ? 'tools' : 'no-tools',
+  ].join('|');
   const previousRenderRef = useRef<{
     messagesRef: TranscriptViewMessage[];
     messageCount: number;
@@ -1256,13 +1342,15 @@ export const RichTranscriptView = React.forwardRef<
 
   // Save VList cache when switching sessions or unmounting.
   // This lets returning to a session skip expensive re-measurement of all item sizes.
+  // Secondary mounts (hover preview) neither read nor write it.
   useEffect(() => {
+    if (!persistScrollState) return;
     return () => {
       if (vlistRef.current && sessionId) {
-        vlistCacheMap.set(sessionId, vlistRef.current.cache);
+        vlistCacheMap.set(vlistCacheKey, vlistRef.current.cache);
       }
     };
-  }, [sessionId]);
+  }, [sessionId, vlistCacheKey, persistScrollState]);
 
   // Track container visibility - when parent is display:none (e.g. mode switch),
   // VList gets 0 height and renders ALL items instead of virtualizing.
@@ -1346,7 +1434,8 @@ export const RichTranscriptView = React.forwardRef<
   // Question tool calls with no result, split by the last user message. The
   // superseded ones render as skipped even when no durable result row exists
   // (older transcripts).
-  const unansweredQuestions = useMemo(() => partitionUnansweredQuestions(messages), [messages]);
+  // Includes questions a sub-agent asked; they sit in its card's child list.
+  const unansweredQuestions = useMemo(() => partitionTranscriptQuestions(messages), [messages]);
   const skippedQuestionIds = useMemo(
     () => new Set(unansweredQuestions.superseded.map(question => question.id)),
     [unansweredQuestions]
@@ -1371,23 +1460,6 @@ export const RichTranscriptView = React.forwardRef<
     if (runningTeammates.length > 0) return true;
     return false;
   }, [messages, sessionStatus, isProcessing, hasPendingInteractivePrompt, runningTeammates, unansweredQuestions]);
-
-  /**
-   * Anchored to the last user message, the same anchor "Finished in ..." uses.
-   * A turn resumed without a fresh user message reads high; inherited.
-   */
-  const turnStartedAt = useMemo(() => {
-    if (!isWaitingForResponse) return undefined;
-    // Draining background work: count from when the oldest task started.
-    if (backgroundTasks?.length) return Math.min(...backgroundTasks.map(t => t.startedAt));
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].type === 'user_message') return messages[i].createdAt?.getTime();
-    }
-    return undefined;
-  }, [isWaitingForResponse, messages, backgroundTasks]);
-
-  // Ref callback rather than state; see the hook for why.
-  const turnElapsedRef = useElapsedTimeRef(turnStartedAt);
 
   // Compute waiting indicator text — show agent/teammate count when lead is idle but agents are running
   const waitingText = useMemo(() => {
@@ -1466,22 +1538,59 @@ export const RichTranscriptView = React.forwardRef<
     return indices;
   }, [messages]);
 
+  // Which row draws which message, and where bundles live. With grouping off
+  // this reproduces the ungrouped transcript row for row.
+  const rowPlan = useMemo(() => planTranscriptRows(messages, {
+    grouping: groupToolCallsEnabled,
+    showToolCalls: settings.showToolCalls,
+    showThinking: settings.showThinking,
+    superseded: supersededToolIndices,
+  }), [messages, groupToolCallsEnabled, settings.showToolCalls, settings.showThinking, supersededToolIndices]);
+  const rowPlanRef = useRef<TranscriptRowPlan>(rowPlan);
+  rowPlanRef.current = rowPlan;
+
+  /**
+   * Anchored to the turn's visible start, the same anchor "Finished in ..."
+   * uses: the last user message not folded into a bundle. A turn resumed
+   * without a fresh user message reads high; inherited.
+   */
+  const turnStartedAt = useMemo(() => {
+    if (!isWaitingForResponse) return undefined;
+    // Draining background work: count from when the oldest task started.
+    if (backgroundTasks?.length) return Math.min(...backgroundTasks.map(t => t.startedAt));
+    const start = turnStartIndex(messages, rowPlan, messages.length);
+    return start < 0 ? undefined : messages[start].createdAt?.getTime();
+  }, [isWaitingForResponse, messages, rowPlan, backgroundTasks]);
+
+  // Ref callback rather than state; see the hook for why.
+  const turnElapsedRef = useElapsedTimeRef(turnStartedAt);
+
+  // Scroll to the row that shows a message; a bundle member opens its bundle.
+  const revealMessage = (index: number, highlight: boolean) => {
+    const plan = rowPlanRef.current;
+    const bundle = plan.bundleOf[index];
+    if (plan.grouping && bundle !== undefined) setExpanded(plan.bundles[bundle].id, true);
+    const row = plan.targetRow(index);
+    if (!vlistRef.current) return;
+    vlistRef.current.scrollToIndex(row, { align: 'center' });
+    if (!highlight) return;
+    // Highlight after scroll settles
+    setTimeout(() => {
+      const messageDiv = messageRefs.current.get(row);
+      if (messageDiv) {
+        messageDiv.classList.add('highlight-message');
+        setTimeout(() => {
+          messageDiv.classList.remove('highlight-message');
+        }, 2000);
+      }
+    }, 100);
+  };
+  const revealMessageRef = useRef(revealMessage);
+  revealMessageRef.current = revealMessage;
+
   // Expose scroll method via ref
   React.useImperativeHandle(ref, () => ({
-    scrollToMessage: (index: number) => {
-      if (!vlistRef.current) return;
-      vlistRef.current.scrollToIndex(index, { align: 'center' });
-      // Highlight after scroll settles
-      setTimeout(() => {
-        const messageDiv = messageRefs.current.get(index);
-        if (messageDiv) {
-          messageDiv.classList.add('highlight-message');
-          setTimeout(() => {
-            messageDiv.classList.remove('highlight-message');
-          }, 2000);
-        }
-      }, 100);
-    },
+    scrollToMessage: (index: number) => revealMessageRef.current(index, true),
     scrollToTop: () => {
       vlistRef.current?.scrollToIndex(0, { align: 'start' });
     }
@@ -1512,7 +1621,8 @@ export const RichTranscriptView = React.forwardRef<
 
     const saved = persistScrollState ? getSessionReturnState(sessionId) : undefined;
     anchorRef.current = saved?.anchor ?? null;
-    const target = decideTranscriptReturnTarget(messages, saved);
+    // A remembered row folded into a bundle returns to the bundle's host row.
+    const target = decideTranscriptReturnTarget(messages, saved, rowPlanRef.current.targetRow);
     // Keep the bottom-follow effect below from overriding the restore.
     if (target.kind !== 'bottom') setAtBottomState(false);
 
@@ -1622,16 +1732,8 @@ export const RichTranscriptView = React.forwardRef<
   };
 
   const toggleToolExpand = useCallback((toolId: string) => {
-    setExpandedTools(prev => {
-      const next = new Set(prev);
-      if (next.has(toolId)) {
-        next.delete(toolId);
-      } else {
-        next.add(toolId);
-      }
-      return next;
-    });
-  }, []);
+    setExpanded(toolId, !(choices.get(toolId) ?? false));
+  }, [choices, setExpanded]);
 
   const copyTranscriptViewMessageContent = async (message: TranscriptViewMessage, index: number) => {
     try {
@@ -1643,23 +1745,26 @@ export const RichTranscriptView = React.forwardRef<
     }
   };
 
-  // Auto-expand sub-agent (Task) tools
+  // A question a sub-agent asks opens its row the first time it appears, even
+  // if the user closed the row before; after that the chevron decides.
   useEffect(() => {
-    const subAgentIds = new Set<string>();
-    messages.forEach(msg => {
-      if (msg.type === 'subagent' && msg.subagentId) {
-        subAgentIds.add(msg.subagentId);
-      }
-    });
-
-    if (subAgentIds.size > 0) {
-      setExpandedTools(prev => {
-        const next = new Set(prev);
-        subAgentIds.forEach(id => next.add(id));
-        return next;
-      });
+    const revealed = (persistScrollState ? revealedChildQuestionsBySession.get(sessionId) : undefined) ?? new Set<string>();
+    if (persistScrollState) revealedChildQuestionsBySession.set(sessionId, revealed);
+    for (const question of unansweredQuestions.open) {
+      const holder = messages[question.index];
+      if (holder?.type !== 'subagent' || !holder.toolCall || revealed.has(question.id)) continue;
+      revealed.add(question.id);
+      setExpanded(getToolStateKey(holder, question.index), true);
     }
-  }, [messages]);
+  }, [unansweredQuestions, messages, sessionId, persistScrollState, setExpanded]);
+
+  // Whether anything still works on the session, so a sub-agent without a
+  // result may be called Stopped. Unknown unless the host reports the drain
+  // and task state; then rows never say Stopped.
+  const sessionActive = backgroundDrainActive === undefined && hasRunningTasks === undefined
+    ? undefined
+    : !!(isProcessing || sessionStatus === 'running' || backgroundDrainActive || hasRunningTasks
+      || hasPendingInteractivePrompt || unansweredQuestions.open.length > 0 || runningTeammates.length > 0);
 
   // Helper to check if message is a login-required error
   // Uses SDK's first-class isAuthError flag when available (preferred)
@@ -1752,25 +1857,22 @@ export const RichTranscriptView = React.forwardRef<
   };
 
   // Recursive tool rendering helper
-  const renderToolCard = (toolMsg: TranscriptViewMessage, toolIndex: number, depth: number = 0): JSX.Element | null => {
+  const renderToolCard = (toolMsg: TranscriptViewMessage, toolIndex: number, depth: number = 0, inBundle: boolean = false): JSX.Element | null => {
     if (!toolMsg.toolCall) return null;
 
     // Hide Task tool calls that were cancelled as siblings of a parallel spawn.
     // These get exactly "<tool_use_error>Sibling tool call errored</tool_use_error>"
     // as their result and were never actually started.
-    if (toolMsg.toolCall.toolName === 'Task' && toolMsg.isError) {
-      const result = toolMsg.toolCall.result;
-      const resultStr = typeof result === 'string' ? result : '';
-      if (/^\s*(<tool_use_error>)?\s*Sibling tool call errored\s*(<\/tool_use_error>)?\s*$/.test(resultStr)) {
-        return null;
-      }
-    }
+    if (isCancelledSiblingTask(toolMsg)) return null;
 
     const tool = toolMsg.toolCall;
-    const toolId = tool.providerToolCallId || tool.toolName || `tool-${toolIndex}`;
+    const toolId = getToolStateKey(toolMsg, toolIndex);
     const toolRenderKey = getTranscriptToolKey(toolMsg, toolIndex, depth);
-    const isExpanded = expandedTools.has(toolId);
     const isSubAgent = toolMsg.type === 'subagent';
+    // Sub-agents open by default only in the ungrouped view; in the compact
+    // view they are one line unless they hold a prompt for the user.
+    const isExpanded = isExpandedKey(toolId, isSubAgent && (!groupToolCallsEnabled || hasInteractiveDescendant(toolMsg)));
+    const toggleExpanded = () => setExpanded(toolId, !isExpanded);
     const isTeammate = isSubAgent && !!(toolMsg.subagent?.teammateName || toolMsg.subagent?.teamName);
     const hasChildren = isSubAgent && toolMsg.subagent?.childEvents && toolMsg.subagent.childEvents.length > 0;
     const lazyDiffLoader = tool.providerToolCallId && loadToolCallDiffs
@@ -1783,7 +1885,11 @@ export const RichTranscriptView = React.forwardRef<
       return (
         <div
           key={toolRenderKey}
-          data-transcript-tool-id={depth === 0 && !supersededToolIndices.has(toolIndex) ? tool.providerToolCallId : undefined}
+          data-transcript-tool-id={
+            (depth === 0 ? !supersededToolIndices.has(toolIndex) : isInteractiveWidgetTool(tool.toolName))
+              ? tool.providerToolCallId
+              : undefined
+          }
           className={`rich-transcript-tool-container mb-2 ${depth > 0 ? 'nested ml-0' : ''}`}
           style={{ marginLeft: depth > 0 ? '1rem' : '0' }}
         >
@@ -1791,7 +1897,7 @@ export const RichTranscriptView = React.forwardRef<
             <CustomWidget
               message={toolMsg}
               isExpanded={isExpanded}
-              onToggle={() => toggleToolExpand(toolId)}
+              onToggle={toggleExpanded}
               workspacePath={workspacePath}
               sessionId={sessionId}
               readFile={readFile}
@@ -1826,6 +1932,7 @@ export const RichTranscriptView = React.forwardRef<
             onOpenFile={onOpenFile}
             renderEmbeddedFile={renderEmbeddedFile}
             canEmbedFile={canEmbedFile}
+            {...(inBundle ? { collapsed: !isExpanded, onToggleCollapsed: toggleExpanded } : {})}
           />
         </div>
       );
@@ -1837,6 +1944,15 @@ export const RichTranscriptView = React.forwardRef<
     const prompt = (isSubAgent && toolArgs?.prompt ? toolArgs.prompt : null) as string | null;
     const subagentAuditLabel = isSubAgent
       ? formatSubagentAuditLabel(toolMsg.subagent?.model, toolMsg.subagent?.reasoningEffort)
+      : null;
+    // Compact view: a sub-agent is one line — description, what it did, status.
+    const compactSubAgent = isSubAgent && groupToolCallsEnabled;
+    const childEvents = toolMsg.subagent?.childEvents ?? [];
+    const subagentWorkLabel = compactSubAgent && childEvents.length > 0
+      ? formatToolCallBundleSummary(summarizeBundleMembers(childEvents, { showThinking: settings.showThinking }))
+      : '';
+    const status = isSubAgent
+      ? subagentStatus(toolMsg, { currentTeammates, sessionActive: groupToolCallsEnabled ? sessionActive : undefined })
       : null;
 
     // Extract result text
@@ -1854,7 +1970,7 @@ export const RichTranscriptView = React.forwardRef<
     return (
       <div key={toolRenderKey} className={`rich-transcript-tool-container mb-2 ${depth > 0 ? 'nested ml-0' : ''}`} style={{ marginLeft: depth > 0 ? '1rem' : '0' }}>
         <div className={cardClass}>
-          <button onClick={() => toggleToolExpand(toolId)} className="rich-transcript-tool-button w-full py-1 px-2 flex items-center gap-1.5 text-left border-none cursor-pointer text-sm bg-transparent">
+          <button onClick={toggleExpanded} className="rich-transcript-tool-button w-full py-1 px-2 flex items-center gap-1.5 text-left border-none cursor-pointer text-sm bg-transparent">
             {isTeammate ? (
               // Group icon for team teammates
               <MaterialSymbol icon="group" size={16} className="rich-transcript-tool-icon sub-agent-icon w-4 h-4 text-[var(--nim-primary)] shrink-0" />
@@ -1881,6 +1997,14 @@ export const RichTranscriptView = React.forwardRef<
                 <span className="rich-transcript-tool-subagent-type text-[var(--nim-primary)] font-semibold"> [{toolMsg.subagent?.agentType}]</span>
               )}
             </span>
+            {compactSubAgent && (
+              <span
+                className="rich-transcript-subagent-description min-w-0 flex-1 truncate text-[var(--nim-text-muted)]"
+                title={description ?? undefined}
+              >
+                {description}
+              </span>
+            )}
             {subagentAuditLabel && (
               <span
                 className="rich-transcript-subagent-audit min-w-0 max-w-40 truncate text-[11px] text-[var(--nim-text-muted)]"
@@ -1888,6 +2012,14 @@ export const RichTranscriptView = React.forwardRef<
                 title={subagentAuditLabel}
               >
                 {toolMsg.subagent?.model}{toolMsg.subagent?.model && toolMsg.subagent?.reasoningEffort ? ' · ' : ''}{toolMsg.subagent?.reasoningEffort}
+              </span>
+            )}
+            {subagentWorkLabel && (
+              <span
+                className="rich-transcript-subagent-work min-w-0 max-w-64 truncate text-[11px] text-[var(--nim-text-muted)]"
+                title={subagentWorkLabel}
+              >
+                {subagentWorkLabel}
               </span>
             )}
             {!isSubAgent && tool.arguments && (() => {
@@ -1924,60 +2056,19 @@ export const RichTranscriptView = React.forwardRef<
               return <span className="rich-transcript-tool-args text-[var(--nim-text-muted)] flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{argStr}</span>;
             })()}
             {/* Status indicator: sub-agents/teammates show live status, regular tools show success/error */}
-            {isSubAgent ? (() => {
-              // Look up teammate status from session metadata
-              // Try tool.teammateAgentId first, then extract agent_id from result text
-              let agentId = toolMsg.subagentId;
-              if (!agentId && tool.result && typeof tool.result === 'string') {
-                const match = tool.result.match(/agent_id:\s*(\S+)/);
-                if (match) agentId = match[1].replace(/[.,]$/, '');
-              }
-              const teammateStatus = agentId ? currentTeammates?.find(t => t.agentId === agentId)?.status : undefined;
-              // If no metadata yet but spawn succeeded (isError due to interception), assume running
-              const effectiveStatus = teammateStatus || (tool.result && toolMsg.isError ? 'running' : tool.result ? 'completed' : null);
-              if (effectiveStatus === 'running') {
-                return (
-                  <span className="flex items-center gap-1 shrink-0">
-                    <span className="inline-block w-3 h-3 border-2 border-[var(--nim-bg-tertiary)] border-t-[var(--nim-primary)] rounded-full animate-spin" />
-                    <span className="text-[11px] text-[var(--nim-text-muted)]">Running</span>
-                  </span>
-                );
-              }
-              if (effectiveStatus === 'idle') {
-                return (
-                  <span className="flex items-center gap-1 shrink-0">
-                    <span className="text-[var(--nim-primary)] text-[10px]">&#9675;</span>
-                    <span className="text-[11px] text-[var(--nim-text-muted)]">Idle</span>
-                  </span>
-                );
-              }
-              if (effectiveStatus === 'completed') {
-                return (
-                  <span className="flex items-center gap-1 shrink-0">
-                    <MaterialSymbol icon="check_circle" size={14} className="text-[var(--nim-success)]" />
-                    <span className="text-[11px] text-[var(--nim-text-muted)]">Done</span>
-                  </span>
-                );
-              }
-              if (effectiveStatus === 'errored') {
-                return (
-                  <span className="flex items-center gap-1 shrink-0">
-                    <MaterialSymbol icon="cancel" size={14} className="text-[var(--nim-error)]" />
-                    <span className="text-[11px] text-[var(--nim-text-muted)]">Errored</span>
-                  </span>
-                );
-              }
-              // Still waiting for result / no status yet - show progress spinner if available
-              if (!tool.result && tool.progress.length > 0) {
-                return (
-                  <span className="flex items-center gap-1 shrink-0">
-                    <span className="inline-block w-3 h-3 border-2 border-[var(--nim-primary)] border-t-transparent rounded-full animate-spin" />
-                    <span className="text-[11px] text-[var(--nim-text-muted)]">Running</span>
-                  </span>
-                );
-              }
-              return null;
-            })() : (
+            {isSubAgent ? (status && (
+              <span className={`rich-transcript-subagent-status rich-transcript-subagent-status--${status} flex items-center gap-1 shrink-0`}>
+                {status === 'running' && (
+                  <span className="inline-block w-3 h-3 border-2 border-[var(--nim-bg-tertiary)] border-t-[var(--nim-primary)] rounded-full animate-spin" />
+                )}
+                {status === 'idle' && <span className="text-[var(--nim-primary)] text-[10px]">&#9675;</span>}
+                {status === 'done' && <MaterialSymbol icon="check_circle" size={14} className="text-[var(--nim-success)]" />}
+                {status === 'errored' && <MaterialSymbol icon="cancel" size={14} className="text-[var(--nim-error)]" />}
+                {status === 'stopped' && <MaterialSymbol icon="stop_circle" size={14} className="text-[var(--nim-text-faint)]" />}
+                {status === 'denied' && <MaterialSymbol icon="block" size={14} className="text-[var(--nim-text-faint)]" />}
+                <span className="text-[11px] text-[var(--nim-text-muted)]">{SUBAGENT_STATUS_LABELS[status]}</span>
+              </span>
+            )) : (
               <>
                 {tool.result && !toolMsg.isError && (
                   <MaterialSymbol icon="check_circle" size={16} className="rich-transcript-tool-success w-4 h-4 text-[var(--nim-success)] shrink-0" />
@@ -1992,8 +2083,8 @@ export const RichTranscriptView = React.forwardRef<
 
           {isExpanded && (
             <div className="rich-transcript-tool-expanded p-2 text-sm border-t border-[var(--nim-border)]">
-              {/* Show description for sub-agents */}
-              {isSubAgent && description && (
+              {/* Show description for sub-agents (the compact header carries it) */}
+              {isSubAgent && description && !compactSubAgent && (
                 <div className="rich-transcript-tool-section mb-1.5">
                   <div className="rich-transcript-tool-description text-sm text-[var(--nim-text)] leading-relaxed mb-2">{description}</div>
                 </div>
@@ -2024,9 +2115,7 @@ export const RichTranscriptView = React.forwardRef<
                     {isTeammate ? 'Teammate' : 'Sub-agent'} Actions ({(toolMsg.subagent?.childEvents ?? []).length}):
                   </div>
                   <div className="rich-transcript-subagent-children flex flex-col gap-1 mt-2">
-                    {(toolMsg.subagent?.childEvents ?? []).map((childMsg: TranscriptViewMessage, childIdx: number) =>
-                      renderToolCard(childMsg, childIdx, depth + 1)
-                    )}
+                    {renderToolList(toolMsg.subagent?.childEvents ?? [], depth + 1)}
                   </div>
                 </div>
               )}
@@ -2077,148 +2166,300 @@ export const RichTranscriptView = React.forwardRef<
     );
   };
 
-  // Rendered message rows. Each row's outer div carries `data-message-index`
-  // and registers its DOM node in `messageRefs` so imperative scroll and
-  // selection helpers can find them.
+  // Compact line for a message the agent received rather than one typed to
+  // it: a teammate notification, a report from another session, a system send.
+  const renderReceivedMessage = (message: TranscriptViewMessage, index: number, label: string, inBundle: boolean): JSX.Element => {
+    const content = message.text?.trim();
+    // Show first line as preview (truncated)
+    const firstLine = content?.split('\n')[0] || '';
+    const preview = firstLine.length > 100 ? firstLine.slice(0, 100) + '...' : firstLine;
+    const hasMoreContent = content && (content.includes('\n') || content.length > 100);
+    return (
+      <div
+        key={inBundle ? `received-${index}` : getTranscriptMessageKey(sessionId, message, index)}
+        {...(inBundle ? {} : {
+          'data-message-index': index,
+          ref: (el: HTMLDivElement | null) => {
+            if (el) {
+              messageRefs.current.set(index, el);
+            } else {
+              messageRefs.current.delete(index);
+            }
+          },
+        })}
+        className={`rich-transcript-message rich-transcript-teammate-notification rounded-md relative max-w-full overflow-x-hidden break-words ${inBundle ? 'mb-2' : 'mb-1'}`}
+      >
+        {hasMoreContent ? (
+          <details>
+            <summary className="flex items-center gap-1.5 py-0.5 text-xs text-[var(--nim-text-faint)] hover:text-[var(--nim-text-muted)]">
+              <MaterialSymbol icon="chevron_right" size={14} className="teammate-chevron transition-transform shrink-0 w-3.5" />
+              <span className="flex-1 truncate">{label}: {preview}</span>
+              <span className="text-[10px] shrink-0">{formatMessageTime(message.createdAt?.getTime() ?? 0)}</span>
+            </summary>
+            <div className="teammate-content ml-5 mt-1 mb-0.5">
+              <MarkdownRenderer content={content} isUser={false} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
+            </div>
+          </details>
+        ) : (
+          <div className="flex items-center gap-1.5 py-0.5 text-xs text-[var(--nim-text-faint)]">
+            <MaterialSymbol icon="chevron_right" size={14} className="shrink-0 w-3.5 invisible" />
+            <span className="flex-1 truncate">{label}: {content}</span>
+            <span className="text-[10px] shrink-0">{formatMessageTime(message.createdAt?.getTime() ?? 0)}</span>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const receivedMessageLabel = (message: TranscriptViewMessage): string => {
+    if (message.metadata?.isTeammateMessage) {
+      return `Received message from agent ${(message.metadata?.teammateName as string) || 'agent'}`;
+    }
+    if (message.promptActor === 'agent') return 'Message from another session';
+    if (message.promptActor === 'system') return 'Automated message';
+    return 'Resumed after your answer';
+  };
+
+  // One member of a bundle, drawn by kind.
+  const renderBundleMember = (message: TranscriptViewMessage, index: number, depth: number): JSX.Element | null => {
+    const role = bundleRole(message, { showThinking: settings.showThinking });
+    if (role.kind !== 'member') return null;
+    switch (role.member) {
+      case 'tool':
+        return renderToolCard(message, index, depth, true);
+      case 'thinking':
+        return (
+          <div key={`thinking-${index}`} className="rich-transcript-bundle-thinking mb-2">
+            <ThinkingBlock thinking={message.thinking ?? ''} />
+          </div>
+        );
+      case 'message':
+        return renderReceivedMessage(message, index, receivedMessageLabel(message), true);
+      case 'denied':
+        return <PermissionDeniedCard key={`denied-${index}`} message={message} inBundle />;
+      case 'notice':
+        return <SystemReminderCard key={`notice-${index}`} message={message} inBundle />;
+    }
+  };
+
+  const renderToolBundle = (
+    bundleId: string,
+    members: { message: TranscriptViewMessage; index: number }[],
+    summary: ToolCallBundleSummary,
+    depth: number,
+  ): JSX.Element => {
+    const isExpanded = isExpandedKey(bundleId);
+    const label = formatToolCallBundleSummary(summary);
+    const isRunning = summary.running > 0 && isWaitingForResponse;
+    const icon = summary.total > 0 ? 'build' : summary.thinking > 0 ? 'psychology' : 'forum';
+    return (
+      <div
+        key={bundleId}
+        className={`rich-transcript-tool-container rich-transcript-tool-bundle-container mb-2 ${depth > 0 ? 'nested ml-0' : ''}`}
+        style={{ marginLeft: depth > 0 ? '1rem' : '0' }}
+      >
+        <div className={`rich-transcript-tool-card rich-transcript-tool-bundle rounded border border-[var(--nim-border)] overflow-hidden ${depth > 0 ? 'bg-[var(--nim-bg-tertiary)]' : 'bg-[var(--nim-bg-secondary)]'}`}>
+          <button
+            type="button"
+            onClick={() => setExpanded(bundleId, !isExpanded)}
+            aria-expanded={isExpanded}
+            className="rich-transcript-tool-button rich-transcript-tool-bundle-button w-full py-1 px-2 flex items-center gap-1.5 text-left border-none cursor-pointer text-sm bg-transparent"
+          >
+            <MaterialSymbol icon={icon} size={16} className="rich-transcript-tool-icon w-4 h-4 text-[var(--nim-primary)] shrink-0" />
+            <span className="rich-transcript-tool-bundle-summary flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[var(--nim-text-muted)]" title={label}>
+              {label}
+            </span>
+            {isRunning && (
+              <span className="rich-transcript-tool-bundle-running inline-block w-3 h-3 border-2 border-[var(--nim-primary)] border-t-transparent rounded-full animate-spin shrink-0" aria-label="Running" />
+            )}
+            {summary.failed > 0 && (
+              <MaterialSymbol
+                icon="cancel"
+                size={16}
+                className="rich-transcript-tool-error rich-transcript-tool-bundle-failed w-4 h-4 text-[var(--nim-error)] shrink-0"
+                title={`${summary.failed} failed`}
+              />
+            )}
+            {summary.total > 0 && !isRunning && summary.failed === 0 && summary.running === 0 && (
+              <MaterialSymbol icon="check_circle" size={16} className="rich-transcript-tool-success w-4 h-4 text-[var(--nim-success)] shrink-0" />
+            )}
+            <MaterialSymbol icon={isExpanded ? 'expand_more' : 'chevron_right'} size={16} className="rich-transcript-tool-chevron w-3 h-3 text-[var(--nim-text-faint)]" />
+          </button>
+          {isExpanded && (
+            <div className="rich-transcript-tool-bundle-items flex flex-col p-2 pb-0 border-t border-[var(--nim-border)]">
+              {members.map(({ message, index }) => renderBundleMember(message, index, depth))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // A sub-agent's child list: only tool calls render there, so its own text
+  // never separates a bundle.
+  const renderToolList = (toolMessages: TranscriptViewMessage[], depth: number): (JSX.Element | null)[] => {
+    if (!groupToolCallsEnabled) {
+      return toolMessages.map((childMsg, childIdx) => renderToolCard(childMsg, childIdx, depth));
+    }
+    return groupToolCalls(toolMessages, { textSeparates: false, showThinking: settings.showThinking }).map((group) =>
+      group.kind === 'bundle'
+        ? renderToolBundle(
+          bundleIdFor(toolMessages[group.indices[0]]),
+          group.indices.map((index) => ({ message: toolMessages[index], index })),
+          group.summary,
+          depth,
+        )
+        : renderToolCard(toolMessages[group.index], group.index, depth)
+    );
+  };
+
+  // Renders the cards and bundles a row carries. A bundle renders once, in
+  // its host row, where its first member appears.
+  const renderTopLevelTools = (carried: number[], row: number): (JSX.Element | null)[] =>
+    carried.map((index) => {
+      const bundleIndex = rowPlan.bundleOf[index];
+      if (bundleIndex === undefined) return renderToolCard(messages[index], index, 0);
+      const bundle = rowPlan.bundles[bundleIndex];
+      if (bundle.members[0] !== index || bundle.hostRow !== row) return null;
+      return renderToolBundle(
+        bundle.id,
+        bundle.members.map((member) => ({ message: messages[member], index: member })),
+        bundle.summary,
+        0,
+      );
+    });
+
+  const registerRow = (index: number) => (el: HTMLDivElement | null) => {
+    if (el) {
+      messageRefs.current.set(index, el);
+    } else {
+      messageRefs.current.delete(index);
+    }
+  };
+
+  const renderMessageHeader = (message: TranscriptViewMessage, index: number, isUser: boolean, canCollapse: boolean) => {
+    const isCollapsed = collapsedMessages.has(index);
+    return (
+      <div className="rich-transcript-message-header flex items-center gap-2 mb-1.5">
+        <div className={`rich-transcript-message-avatar w-7 h-7 rounded-full shrink-0 flex items-center justify-center ${isUser ? 'user' : 'assistant'}`}>
+          {isUser ? (
+            <MaterialSymbol icon="person" size={18} />
+          ) : (
+            <ProviderIcon provider={provider || 'claude-code'} size={18} />
+          )}
+        </div>
+        <div className="rich-transcript-message-meta flex-1 flex items-baseline gap-2">
+          <span className="rich-transcript-message-sender font-medium text-[var(--nim-text)] text-sm">
+            {isUser ? 'You' : getProviderDisplayName(provider)}
+          </span>
+          {isUser && message.mode === 'planning' && (
+            <span
+              className="text-[10px] rounded-full font-medium"
+              style={{ backgroundColor: '#3b82f6', color: 'white', padding: '2px 6px' }}
+            >
+              Plan
+            </span>
+          )}
+          <span className="rich-transcript-message-time text-xs text-[var(--nim-text-faint)]">
+            {formatMessageTime(message.createdAt?.getTime() ?? 0)}
+          </span>
+        </div>
+        <div className="rich-transcript-message-actions flex items-center gap-1">
+          {canCollapse && (message.text ?? '').length > 200 && (
+            <button
+              onClick={() => toggleMessageCollapse(index)}
+              className="rich-transcript-collapse-button p-1 rounded-md bg-transparent border-none text-[var(--nim-text-faint)] cursor-pointer transition-colors hover:bg-[var(--nim-bg-secondary)] hover:text-[var(--nim-text-muted)]"
+              title={isCollapsed ? "Show full message" : "Collapse message"}
+            >
+              {isCollapsed ? (
+                <MaterialSymbol icon="visibility" size={16} />
+              ) : (
+                <MaterialSymbol icon="visibility_off" size={16} />
+              )}
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // "Finished in ..." under the row that ends an assistant turn.
+  const renderTurnFinished = (index: number) => {
+    const end = rowPlan.turnEnd[index];
+    if (!end) return null;
+    // Don't show for the last assistant group if still streaming
+    if (isWaitingForResponse && end.open) return null;
+    // The user message that started this turn; a folded automated message does not.
+    const startIdx = turnStartIndex(messages, rowPlan, index);
+    if (startIdx < 0) return null; // No preceding user input message
+    const startTimestamp = messages[startIdx].createdAt?.getTime() ?? 0;
+    const endTimestamp = messages[end.endIndex].createdAt?.getTime() ?? 0;
+    const duration = formatDuration(startTimestamp, endTimestamp);
+    if (!duration || duration === '0ms') return null;
+    const finishedAt = formatTurnFinishedAt(endTimestamp);
+    const fileStats = computeTurnFileStats(messages, startIdx, end.endIndex);
+    return (
+      <div className="rich-transcript-turn-elapsed text-xs text-[var(--nim-text-faint)] mt-2 ml-6">
+        Finished in {duration}
+        {finishedAt && <span> {finishedAt}</span>}
+        {fileStats && (
+          <span>
+            {' · '}{fileStats.filesModified} file{fileStats.filesModified !== 1 ? 's' : ''}
+            {fileStats.linesAdded > 0 && <span className="text-[var(--nim-success)] opacity-60"> +{fileStats.linesAdded}</span>}
+            {fileStats.linesRemoved > 0 && <span className="text-[var(--nim-error)] opacity-60"> -{fileStats.linesRemoved}</span>}
+          </span>
+        )}
+      </div>
+    );
+  };
+
+  // Rendered message rows, one per message as the row plan decides. Each
+  // visible row's outer div carries `data-message-index` and registers its
+  // DOM node in `messageRefs` so imperative scroll and selection helpers can
+  // find them.
   const renderedMessages = messages.map((message, index) => {
     const messageKey = getTranscriptMessageKey(sessionId, message, index);
-    // Skip tool calls superseded by a later event with the same providerToolCallId
-    if (supersededToolIndices.has(index)) {
+    const role = rowPlan.role[index];
+    if (role === 'hidden') {
+      // Return empty div for virtualization (can't return null)
       return <div key={messageKey} style={{ display: 'none' }} />;
     }
 
     const isUser = message.type === 'user_message';
-    const isTool = isToolLikeMessage(message);
     const isCollapsed = collapsedMessages.has(index);
+    const isNewGroup = rowPlan.isNewGroup[index];
+    const carried = rowPlan.carried[index];
 
-    // Hide assistant/tool messages that sit between agent notifications.
-    // These are the agent's internal processing turns after receiving a teammate/sub-agent
-    // message - they appear as dark bars with scrollbars and add visual noise.
-    // NEVER hide interactive tool widgets (ToolPermission, ExitPlanMode, etc.) that require user action.
-    // Also never hide assistant messages that would carry interactive widgets in toolMessagesBefore.
-    if (message.type === 'assistant_message' || isToolLikeMessage(message)) {
-      const isInteractiveWidget = isToolLikeMessage(message)
-        && isInteractiveWidgetTool(message.toolCall?.toolName);
-      // For assistant messages, check if preceding tool messages contain interactive widgets
-      let hasInteractiveToolsBefore = false;
-      if (message.type === 'assistant_message') {
-        let checkPrev = index - 1;
-        while (checkPrev >= 0 && isToolLikeMessage(messages[checkPrev])) {
-          if (isInteractiveWidgetTool(messages[checkPrev].toolCall?.toolName)) {
-            hasInteractiveToolsBefore = true;
-            break;
-          }
-          checkPrev--;
-        }
-      }
-      if (!isInteractiveWidget && !hasInteractiveToolsBefore) {
-        // Walk back to find the nearest user message (skipping tool and assistant messages)
-        let prevIdx = index - 1;
-        while (prevIdx >= 0 && messages[prevIdx].type !== 'user_message') prevIdx--;
-        if (prevIdx >= 0 && messages[prevIdx].metadata?.isTeammateMessage) {
-          // The most recent user message before this is a teammate notification.
-          // Only hide empty processing turns (no substantive content).
-          const hasNoContent = !message.text?.trim();
-          if (hasNoContent) {
-            return <div key={messageKey} style={{ display: 'none' }} />;
-          }
-        }
-      }
-    }
-
-    // Find tool messages that should be grouped with this message
-    const toolMessagesBefore: { message: TranscriptViewMessage, index: number }[] = [];
-    if (message.type === 'assistant_message') {
-      let checkIdx = index - 1;
-      while (checkIdx >= 0 && isToolLikeMessage(messages[checkIdx])) {
-        toolMessagesBefore.unshift({ message: messages[checkIdx], index: checkIdx });
-        checkIdx--;
-      }
-    }
-
-    // Skip rendering tool messages - they'll be rendered with their assistant message
-    if (isTool) {
-      let nextIndex = index + 1;
-      while (nextIndex < messages.length && isToolLikeMessage(messages[nextIndex])) {
-        nextIndex++;
-      }
-      if (nextIndex < messages.length && messages[nextIndex].type === 'assistant_message') {
-        // Return empty div for virtualization (can't return null)
-        return <div key={messageKey} style={{ display: 'none' }} />;
-      }
-    }
-
-    // Check if this is the start of a new message group
-    let effectivePrevMessage = null;
-    let checkIdx = index - 1;
-    while (checkIdx >= 0 && isToolLikeMessage(messages[checkIdx])) {
-      checkIdx--;
-    }
-    if (checkIdx >= 0) {
-      effectivePrevMessage = messages[checkIdx];
-    }
-    const isNewGroup = !effectivePrevMessage || effectivePrevMessage.type !== message.type;
-
-    // Render orphaned tool calls.
-    // When settings.showToolCalls is false, hide non-interactive tool
-    // rows from the chat view but always render interactive widgets
-    // (ToolPermission / ExitPlanMode / AskUserQuestion /
-    // PromptForUserInput / RequestUserInput / GitCommitProposal)
-    // so the user can still act on prompts.
-    if (isTool && message.toolCall) {
-      const isInteractiveWidget = isInteractiveWidgetTool(message.toolCall.toolName);
-      if (!settings.showToolCalls && !isInteractiveWidget) {
-        return <div key={messageKey} style={{ display: 'none' }} />;
-      }
+    // Tool calls with no assistant row after them draw in their own row.
+    if (isToolLikeMessage(message)) {
       return (
         <div key={messageKey} className="rich-transcript-tool-container orphan ml-6 mb-2">
-          {renderToolCard(message, index, 0)}
+          {renderTopLevelTools(carried, index)}
+        </div>
+      );
+    }
+
+    // The row of a folded step that hosts cards or a bundle: agent work, no text.
+    if (role === 'host') {
+      return (
+        <div
+          key={messageKey}
+          data-message-index={index}
+          ref={registerRow(index)}
+          className={`rich-transcript-message rich-transcript-bundle-host rounded-md relative max-w-full overflow-x-hidden break-words mb-2 assistant bg-[var(--nim-bg)] ${settings.compactMode ? 'compact p-2' : 'normal p-3'} ${!isNewGroup ? 'continuation -mt-1' : ''}`}
+        >
+          {isNewGroup && renderMessageHeader(message, index, false, false)}
+          <div className={`rich-transcript-tool-messages flex flex-col gap-2 ${isNewGroup ? 'indented ml-6' : ''}`}>
+            {renderTopLevelTools(carried, index)}
+          </div>
+          {renderTurnFinished(index)}
         </div>
       );
     }
 
     // Render teammate/sub-agent messages as compact inline notifications
     if (isUser && message.metadata?.isTeammateMessage) {
-      const teammateName = (message.metadata?.teammateName as string) || 'agent';
-      const label = `Received message from agent ${teammateName}`;
-      const content = message.text?.trim();
-      // Show first line as preview (truncated)
-      const firstLine = content?.split('\n')[0] || '';
-      const preview = firstLine.length > 100 ? firstLine.slice(0, 100) + '...' : firstLine;
-      const hasMoreContent = content && (content.includes('\n') || content.length > 100);
-      return (
-        <div
-          key={messageKey}
-          data-message-index={index}
-          ref={(el) => {
-            if (el) {
-              messageRefs.current.set(index, el);
-            } else {
-              messageRefs.current.delete(index);
-            }
-          }}
-          className="rich-transcript-message rich-transcript-teammate-notification rounded-md relative max-w-full overflow-x-hidden break-words mb-1"
-        >
-          {hasMoreContent ? (
-            <details>
-              <summary className="flex items-center gap-1.5 py-0.5 text-xs text-[var(--nim-text-faint)] hover:text-[var(--nim-text-muted)]">
-                <MaterialSymbol icon="chevron_right" size={14} className="teammate-chevron transition-transform shrink-0 w-3.5" />
-                <span className="flex-1 truncate">{label}: {preview}</span>
-                <span className="text-[10px] shrink-0">{formatMessageTime(message.createdAt?.getTime() ?? 0)}</span>
-              </summary>
-              <div className="teammate-content ml-5 mt-1 mb-0.5">
-                <MarkdownRenderer content={content} isUser={false} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
-              </div>
-            </details>
-          ) : (
-            <div className="flex items-center gap-1.5 py-0.5 text-xs text-[var(--nim-text-faint)]">
-              <MaterialSymbol icon="chevron_right" size={14} className="shrink-0 w-3.5 invisible" />
-              <span className="flex-1 truncate">{label}: {content}</span>
-              <span className="text-[10px] shrink-0">{formatMessageTime(message.createdAt?.getTime() ?? 0)}</span>
-            </div>
-          )}
-        </div>
-      );
+      return renderReceivedMessage(message, index, receivedMessageLabel(message), false);
     }
 
     if (message.type === 'system_message' && message.systemMessage?.systemType === 'permission_denied') {
@@ -2239,16 +2480,10 @@ export const RichTranscriptView = React.forwardRef<
         );
       }
       // Auto-mode classifier denials are paired with a re-prompt from the
-      // PermissionDenied SDK hook (see AgentToolHooks.createPermissionDeniedHook).
-      // The user sees the regular ToolPermission widget with the classifier
-      // reason in its warnings, so rendering the red "Tool denied" card on top
-      // of that would be redundant and confusing -- skip it.
-      //
-      // Other deny sources (`rule`, `mode`, `asyncAgent`, headless auto-deny)
-      // stay visible because no re-prompt happens for those paths.
-      if (message.systemMessage.deniedReasonType === 'classifier') {
-        return <div key={messageKey} style={{ display: 'none' }} />;
-      }
+      // PermissionDenied SDK hook (see AgentToolHooks.createPermissionDeniedHook);
+      // the row plan hides them. Other deny sources (`rule`, `mode`,
+      // `asyncAgent`, headless auto-deny) stay visible because no re-prompt
+      // happens for those paths.
       return (
         <div
           key={messageKey}
@@ -2267,13 +2502,7 @@ export const RichTranscriptView = React.forwardRef<
         <div
           key={messageKey}
           data-message-index={index}
-          ref={(el) => {
-            if (el) {
-              messageRefs.current.set(index, el);
-            } else {
-              messageRefs.current.delete(index);
-            }
-          }}
+          ref={registerRow(index)}
         >
           <SystemReminderCard message={message} />
         </div>
@@ -2284,13 +2513,7 @@ export const RichTranscriptView = React.forwardRef<
       <div
         key={messageKey}
         data-message-index={index}
-        ref={(el) => {
-          if (el) {
-            messageRefs.current.set(index, el);
-          } else {
-            messageRefs.current.delete(index);
-          }
-        }}
+        ref={registerRow(index)}
         className={`rich-transcript-message rounded-md relative max-w-full overflow-x-hidden break-words mb-2 ${isUser ? 'user bg-[var(--nim-bg-secondary)]' : 'assistant bg-[var(--nim-bg)]'} ${settings.compactMode ? 'compact p-2' : 'normal p-3'} ${!isNewGroup ? 'continuation -mt-1' : ''}`}
       >
         {/* Restart indicator line (dev mode only) - rendered before the first message after restart */}
@@ -2303,66 +2526,13 @@ export const RichTranscriptView = React.forwardRef<
             <div className="flex-1 h-px bg-[var(--nim-error)]" />
           </div>
         )}
-        {isNewGroup && (
-          <div className="rich-transcript-message-header flex items-center gap-2 mb-1.5">
-            <div className={`rich-transcript-message-avatar w-7 h-7 rounded-full shrink-0 flex items-center justify-center ${isUser ? 'user' : 'assistant'}`}>
-              {isUser ? (
-                <MaterialSymbol icon="person" size={18} />
-              ) : (
-                <ProviderIcon provider={provider || 'claude-code'} size={18} />
-              )}
-            </div>
-            <div className="rich-transcript-message-meta flex-1 flex items-baseline gap-2">
-              <span className="rich-transcript-message-sender font-medium text-[var(--nim-text)] text-sm">
-                {isUser ? 'You' : getProviderDisplayName(provider)}
-              </span>
-              {isUser && message.mode === 'planning' && (
-                <span
-                  className="text-[10px] rounded-full font-medium"
-                  style={{ backgroundColor: '#3b82f6', color: 'white', padding: '2px 6px' }}
-                >
-                  Plan
-                </span>
-              )}
-              <span className="rich-transcript-message-time text-xs text-[var(--nim-text-faint)]">
-                {formatMessageTime(message.createdAt?.getTime() ?? 0)}
-              </span>
-            </div>
-            <div className="rich-transcript-message-actions flex items-center gap-1">
-              {(message.text ?? '').length > 200 && (
-                <button
-                  onClick={() => toggleMessageCollapse(index)}
-                  className="rich-transcript-collapse-button p-1 rounded-md bg-transparent border-none text-[var(--nim-text-faint)] cursor-pointer transition-colors hover:bg-[var(--nim-bg-secondary)] hover:text-[var(--nim-text-muted)]"
-                  title={isCollapsed ? "Show full message" : "Collapse message"}
-                >
-                  {isCollapsed ? (
-                    <MaterialSymbol icon="visibility" size={16} />
-                  ) : (
-                    <MaterialSymbol icon="visibility_off" size={16} />
-                  )}
-                </button>
-              )}
-            </div>
+        {isNewGroup && renderMessageHeader(message, index, isUser, true)}
+
+        {carried.length > 0 && (
+          <div className={`rich-transcript-tool-messages flex flex-col gap-2 mb-1.5 ${isNewGroup ? 'indented ml-6' : ''}`}>
+            {renderTopLevelTools(carried, index)}
           </div>
         )}
-
-        {toolMessagesBefore.length > 0 && (() => {
-          // Filter out non-interactive tool messages when settings.showToolCalls
-          // is off; always keep interactive widgets so the user can act on prompts.
-          const visibleToolMessages = settings.showToolCalls
-            ? toolMessagesBefore
-            : toolMessagesBefore.filter(
-                ({ message: toolMsg }) => isInteractiveWidgetTool(toolMsg.toolCall?.toolName)
-              );
-          if (visibleToolMessages.length === 0) return null;
-          return (
-            <div className={`rich-transcript-tool-messages flex flex-col gap-2 mb-1.5 ${isNewGroup ? 'indented ml-6' : ''}`}>
-              {visibleToolMessages.map(({ message: toolMsg, index: toolIndex }) =>
-                renderToolCard(toolMsg, toolIndex, 0)
-              )}
-            </div>
-          );
-        })()}
 
         <div className={`rich-transcript-message-content relative ${isNewGroup ? 'ml-6' : 'no-indent ml-0'}`}>
           {/* Copy button - shows on hover */}
@@ -2400,43 +2570,7 @@ export const RichTranscriptView = React.forwardRef<
         </div>
 
         {/* Show elapsed time at the end of a completed assistant turn */}
-        {!isUser && (() => {
-          // Check if this is the last message in the assistant group
-          let nextNonToolIdx = index + 1;
-          while (nextNonToolIdx < messages.length && isToolLikeMessage(messages[nextNonToolIdx])) {
-            nextNonToolIdx++;
-          }
-          const isEndOfGroup = nextNonToolIdx >= messages.length || messages[nextNonToolIdx].type !== 'assistant_message';
-          if (!isEndOfGroup) return null;
-          // Don't show for the last assistant group if still streaming
-          if (isWaitingForResponse && nextNonToolIdx >= messages.length) return null;
-          // Find the preceding user-input message that triggered this turn
-          // Only consider genuine user input (isUserInput), not system-generated user-role messages
-          let startIdx = index - 1;
-          while (startIdx >= 0 && !(messages[startIdx].type === 'user_message')) {
-            startIdx--;
-          }
-          if (startIdx < 0) return null; // No preceding user input message
-          const startTimestamp = messages[startIdx].createdAt?.getTime() ?? 0;
-          const endTimestamp = message.createdAt?.getTime() ?? 0;
-          const duration = formatDuration(startTimestamp, endTimestamp);
-          if (!duration || duration === '0ms') return null;
-          const finishedAt = formatTurnFinishedAt(endTimestamp);
-          const fileStats = computeTurnFileStats(messages, startIdx, index);
-          return (
-            <div className="rich-transcript-turn-elapsed text-xs text-[var(--nim-text-faint)] mt-2 ml-6">
-              Finished in {duration}
-              {finishedAt && <span> {finishedAt}</span>}
-              {fileStats && (
-                <span>
-                  {' · '}{fileStats.filesModified} file{fileStats.filesModified !== 1 ? 's' : ''}
-                  {fileStats.linesAdded > 0 && <span className="text-[var(--nim-success)] opacity-60"> +{fileStats.linesAdded}</span>}
-                  {fileStats.linesRemoved > 0 && <span className="text-[var(--nim-error)] opacity-60"> -{fileStats.linesRemoved}</span>}
-                </span>
-              )}
-            </div>
-          );
-        })()}
+        {!isUser && renderTurnFinished(index)}
 
       </div>
     );
@@ -2450,9 +2584,7 @@ export const RichTranscriptView = React.forwardRef<
         messages={messages}
         containerRef={scrollContainerRef}
         onClose={() => setShowSearchBar(false)}
-        onScrollToMessage={(index) => {
-          vlistRef.current?.scrollToIndex(index, { align: 'center' });
-        }}
+        onScrollToMessage={(index) => revealMessage(index, false)}
       />
 
       {/* Settings Panel */}
@@ -2520,7 +2652,7 @@ export const RichTranscriptView = React.forwardRef<
                   style={{ height: '100%' }}
                   bufferSize={vlistBufferSize}
                   itemSize={90}
-                  cache={vlistCacheMap.get(sessionId)}
+                  cache={persistScrollState ? vlistCacheMap.get(vlistCacheKey) : undefined}
                   onScrollEnd={() => {
                     if (!hitFalseTopRef.current) return;
                     hitFalseTopRef.current = false;
@@ -2544,7 +2676,8 @@ export const RichTranscriptView = React.forwardRef<
                       // Update the per-session atom - this persists across component remounts
                       setAtBottomState(isAtBottom);
                       if (persistScrollState) {
-                        const topIndex = vlistRef.current.findItemIndex(offset);
+                        // Hidden rows have no height; anchor on the row actually shown.
+                        const topIndex = rowPlan.visibleRowAtOrAfter(vlistRef.current.findItemIndex(offset));
                         const topMessage = messages[topIndex];
                         anchorRef.current = topMessage && topMessage.sequence >= 0
                           ? { sequence: topMessage.sequence, offset: offset - vlistRef.current.getItemOffset(topIndex) }

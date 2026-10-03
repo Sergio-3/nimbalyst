@@ -103,6 +103,8 @@ describe('SettingsService', () => {
     expect(svc.get('ai.provider.openai')).toMatchObject({ enabled: false });
     expect(svc.get('ai.defaultProvider')).toBe('claude-code');
     expect(svc.get('ai.chatShowToolCalls')).toBe(true);
+    // Consecutive tool calls are grouped unless the user turns it off.
+    expect(svc.get('ai.chatGroupToolCalls')).toBe(true);
     expect(svc.get('ai.apiKey.anthropic')).toBe('');
     // Subscription CLI is off by default (opt-in).
     expect(svc.get('ai.provider.claude-code-cli')).toMatchObject({ enabled: false });

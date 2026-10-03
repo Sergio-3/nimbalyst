@@ -69,6 +69,8 @@ export interface TranscriptViewMessage {
   promptActor?: UserMessagePayload['promptActor'];
   /** user_message only: automated origin such as `interactive-question`. */
   promptOrigin?: string;
+  /** user_message only: orchestration kind of an agent send (report, instruction, ...). */
+  promptMessageKind?: UserMessagePayload['promptMessageKind'];
   /**
    * user_message only: shown before main persisted it. A send that then fails
    * leaves this row behind, so it must not close open questions.
@@ -255,6 +257,7 @@ function projectEvent(
       }
       if (p.promptActor) base.promptActor = p.promptActor;
       if (p.promptOrigin) base.promptOrigin = p.promptOrigin;
+      if (p.promptMessageKind) base.promptMessageKind = p.promptMessageKind;
       break;
     }
     case 'assistant_message': {

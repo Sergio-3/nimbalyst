@@ -128,6 +128,7 @@ import {
   type ComposerDisabledReason,
   type SendBlockedReason,
 } from '../../../shared/analytics/sendOutcomes';
+import { settingAtom } from '../../store/atoms/settingAtomFamily';
 import { setAgentModeSettingsAtom, showPromptAdditionsAtom, hasExternalEditorAtom, externalEditorNameAtom, openInExternalEditorAtom, defaultAgentModelAtom, defaultEffortLevelAtom, defaultThinkingModeAtom, chatShowToolCallsAtom, developerModeAtom } from '../../store/atoms/appSettings';
 import { supportsEffortLevel, supportsThinkingToggle, parseEffortLevel, resolveThinkingMode, type EffortLevel, type ThinkingMode } from '../../utils/modelUtils';
 import { buildPlanImplementationPrompt, resolvePlanFilePath } from '../../utils/pathUtils';
@@ -406,6 +407,7 @@ const LocalSessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscrip
   const tokenUsage = useAtomValue(sessionTokenUsageAtom(sessionId));
   const isDataLoading = useAtomValue(sessionLoadingAtom(sessionId));
   const chatShowToolCalls = useAtomValue(chatShowToolCallsAtom);
+  const chatGroupToolCalls = useAtomValue(settingAtom('ai.chatGroupToolCalls'));
   const [aiMode, setAiMode] = useAtom(sessionModeAtom(sessionId));
   const [currentModel, setCurrentModel] = useAtom(sessionModelAtom(sessionId));
   const [isArchived, setIsArchived] = useAtom(sessionArchivedAtom(sessionId));
@@ -2538,7 +2540,7 @@ const LocalSessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscrip
             initialSettings={{
               showToolCalls: chatShowToolCalls,
               compactMode: false,
-              collapseTools: false,
+              collapseTools: chatGroupToolCalls,
               showThinking: true,
               showSessionInit: false
             }}
@@ -2563,6 +2565,8 @@ const LocalSessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscrip
             onCompact={compactionSupport === 'unsupported' ? undefined : handleCompact}
             promptAdditions={showPromptAdditions ? promptAdditions : null}
             currentTeammates={transcriptTeammates}
+            backgroundDrainActive={backgroundDrainActive}
+            hasRunningTasks={hasRunningTasks}
             waitingForNoun={waitingForNoun}
             backgroundTasks={isProcessing && backgroundTasks?.length ? backgroundTasks : undefined}
             appStartTime={appStartTime ?? undefined}

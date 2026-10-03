@@ -66,6 +66,8 @@ interface QuestionScanMessage {
   text?: string;
   promptActor?: string;
   promptOrigin?: string;
+  /** Orchestration kind of an agent send (`report`, `instruction`, ...). */
+  promptMessageKind?: string;
   optimistic?: boolean;
   toolCall?: { toolName?: string; providerToolCallId?: string | null; result?: unknown } | null;
 }
@@ -77,6 +79,25 @@ interface QuestionScanMessage {
  */
 const ANSWER_RESUME_PREFIX = '[Resuming after answering a question]';
 
+/** Agent sends that only inform: a child's report or status update. */
+const INFORMATIONAL_MESSAGE_KINDS = new Set(['report', 'status']);
+
+/**
+ * Whether a user-role message was sent by automation rather than typed by
+ * anyone: system sends (super-loop rounds, wakeups), informational reports
+ * from other sessions, and the answer auto-resume. An agent's instruction to
+ * this session is not automated in this sense — it is the work order the
+ * session runs on. A row without provenance counts as typed: older rows never
+ * recorded it.
+ */
+export function isAutomatedPrompt(message: QuestionScanMessage): boolean {
+  if (message.type !== 'user_message' || message.optimistic) return false;
+  if (message.promptActor === 'system') return true;
+  if (message.promptActor === 'agent' && INFORMATIONAL_MESSAGE_KINDS.has(message.promptMessageKind ?? '')) return true;
+  if (message.promptOrigin === 'interactive-question') return true;
+  return !!message.text?.startsWith(ANSWER_RESUME_PREFIX);
+}
+
 /**
  * Whether a message is a human turn, the only thing that closes an open
  * question. Agent sends (`send_prompt`, child-session updates), system sends
@@ -86,9 +107,8 @@ const ANSWER_RESUME_PREFIX = '[Resuming after answering a question]';
  */
 function isHumanTurnBoundary(message: QuestionScanMessage): boolean {
   if (message.type !== 'user_message' || message.optimistic) return false;
-  if (message.promptActor === 'agent' || message.promptActor === 'system') return false;
-  if (message.promptOrigin === 'interactive-question') return false;
-  return !message.text?.startsWith(ANSWER_RESUME_PREFIX);
+  if (message.promptActor === 'agent') return false;
+  return !isAutomatedPrompt(message);
 }
 
 /**

@@ -55,6 +55,7 @@ export interface UserMessageDescriptor {
   /** Stamped from the raw row's metadata by `stampPromptSource`, not by parsers. */
   promptActor?: UserMessagePayload['promptActor'];
   promptOrigin?: string;
+  promptMessageKind?: UserMessagePayload['promptMessageKind'];
 }
 
 export interface AssistantMessageDescriptor {

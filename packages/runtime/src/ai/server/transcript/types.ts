@@ -34,6 +34,8 @@ export interface UserMessagePayload {
    */
   promptActor?: 'human' | 'agent' | 'system';
   promptOrigin?: string;
+  /** `promptProvenance.messageKind` of an agent send: report, instruction, ... */
+  promptMessageKind?: 'instruction' | 'report' | 'status' | 'question' | 'error';
   attachments?: Array<{
     id: string;
     filename: string;

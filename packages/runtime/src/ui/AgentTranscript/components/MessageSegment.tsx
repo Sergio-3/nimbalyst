@@ -16,6 +16,19 @@ import { formatToolDisplayName } from '../utils/toolNameFormatter';
 import { isCommitRequestMessage, parseCommitRequest, CommitRequestCard } from './CommitRequestCard';
 import { localAssetUrl } from '../../../utils/localAssetUrl';
 
+/** Extended thinking, collapsed by default. Also rendered inside tool-call bundles. */
+export const ThinkingBlock: React.FC<{ thinking: string }> = ({ thinking }) => (
+  <details className="rich-transcript-thinking rounded-md border border-[var(--nim-border)] bg-[var(--nim-bg-secondary)]">
+    <summary className="flex items-center gap-1.5 px-2 py-1 text-xs text-[var(--nim-text-muted)] cursor-pointer select-none">
+      <MaterialSymbol icon="psychology" size={14} />
+      <span>Thinking</span>
+    </summary>
+    <div className="px-2 pb-2 pt-1 text-xs text-[var(--nim-text-muted)] whitespace-pre-wrap">
+      {thinking}
+    </div>
+  </details>
+);
+
 interface MessageSegmentProps {
   message: TranscriptViewMessage;
   isUser: boolean;
@@ -150,17 +163,7 @@ export const MessageSegment: React.FC<MessageSegmentProps> = ({
     if (!showThinking) return null;
     const thinking = (message as TranscriptViewMessage).thinking;
     if (!thinking || !thinking.trim()) return null;
-    return (
-      <details className="rich-transcript-thinking rounded-md border border-[var(--nim-border)] bg-[var(--nim-bg-secondary)]">
-        <summary className="flex items-center gap-1.5 px-2 py-1 text-xs text-[var(--nim-text-muted)] cursor-pointer select-none">
-          <MaterialSymbol icon="psychology" size={14} />
-          <span>Thinking</span>
-        </summary>
-        <div className="px-2 pb-2 pt-1 text-xs text-[var(--nim-text-muted)] whitespace-pre-wrap">
-          {thinking}
-        </div>
-      </details>
-    );
+    return <ThinkingBlock thinking={thinking} />;
   };
 
   // Render text content

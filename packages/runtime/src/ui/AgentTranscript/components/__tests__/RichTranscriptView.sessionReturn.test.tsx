@@ -3,6 +3,7 @@ import { act, render } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TranscriptViewMessage } from '../../../../ai/server/transcript/TranscriptProjector';
 import { RichTranscriptView } from '../RichTranscriptView';
+import { setSessionReturnState } from '../../../../store/atoms/transcriptScroll';
 
 // Rows are 100px tall in this fake list; the viewport shows one row.
 const vlist = vi.hoisted(() => ({
@@ -118,6 +119,39 @@ describe('RichTranscriptView returning to a session', () => {
     show('return-tools', [...history, tool(11, 'Read'), tool(12, 'Bash')]);
     expect(vlist.scrollToIndex).toHaveBeenCalledTimes(1);
     expect(vlist.scrollToIndex).toHaveBeenCalledWith(3, { align: 'start', offset: 40 });
+  });
+
+  describe('with steps folded into bundles', () => {
+    const grouped = { showToolCalls: true, showThinking: true, compactMode: false, collapseTools: true, showSessionInit: false };
+    const thinking = (sequence: number): TranscriptViewMessage => ({ ...text(sequence, ''), thinking: 'considering' });
+    const report = (sequence: number): TranscriptViewMessage => ({
+      ...text(sequence, 'Child done', 'user_message'), promptActor: 'agent', promptMessageKind: 'report',
+    });
+    // Row 1 hosts the bundle [thinking, Read, report, thinking]; rows 2-4 are hidden.
+    const folded = [text(1, 'go', 'user_message'), thinking(2), tool(3, 'Read'), report(4), thinking(5), text(6, 'Done'), text(7, 'next', 'user_message')];
+    folded[2].toolCall!.status = 'completed';
+    folded[2].toolCall!.result = 'ok';
+
+    it('returns to the host row when the remembered row is a member behind it', () => {
+      setSessionReturnState('return-folded', { lastSequence: 7, anchor: { sequence: 4, offset: 40 }, atBottom: false });
+      render(<RichTranscriptView sessionId="return-folded" sessionStatus="idle" messages={folded} provider="claude-code" settings={grouped} />);
+      flushFrames();
+      expect(vlist.scrollToIndex).toHaveBeenCalledTimes(1);
+      expect(vlist.scrollToIndex).toHaveBeenCalledWith(1, { align: 'start', offset: 0 });
+    });
+
+    it('jumps to a member by opening its bundle on the host row', () => {
+      const ref = React.createRef<{ scrollToMessage: (index: number) => void; scrollToTop: () => void }>();
+      const { container } = render(
+        <RichTranscriptView ref={ref} sessionId="jump-folded" sessionStatus="idle" messages={folded} provider="claude-code"
+          settings={grouped} persistScrollState={false} />,
+      );
+      flushFrames();
+      vlist.scrollToIndex.mockClear();
+      act(() => ref.current!.scrollToMessage(3));
+      expect(vlist.scrollToIndex).toHaveBeenCalledWith(1, { align: 'center' });
+      expect(container.querySelector('.rich-transcript-tool-bundle-button')!.getAttribute('aria-expanded')).toBe('true');
+    });
   });
 
   it('does not jump back to an old open question far up the transcript', () => {

@@ -18,13 +18,13 @@ import type { TranscriptViewMessage } from '@nimbalyst/runtime/ai/server/types';
 import { getCardType } from '../../store/atoms/sessionKanban';
 import { sessionRegistryAtom } from '../../store/atoms/sessions';
 import { transcriptEventSignalAtom } from '../../store/atoms/sessionTranscript';
+import { settingAtom } from '../../store/atoms/settingAtomFamily';
 
 const tailMessageCache = new Map<string, TranscriptViewMessage[]>();
 
 const PEEK_SETTINGS = {
   showToolCalls: true,
   compactMode: true,
-  collapseTools: true,
   showThinking: false,
   showSessionInit: false,
 };
@@ -50,6 +50,9 @@ export function SessionTranscriptPeek({
   onClose,
 }: SessionTranscriptPeekProps) {
   const registry = useAtomValue(sessionRegistryAtom);
+  // The preview groups tool calls exactly when the main transcript does.
+  const collapseTools = useAtomValue(settingAtom('ai.chatGroupToolCalls'));
+  const peekSettings = useMemo(() => ({ ...PEEK_SETTINGS, collapseTools }), [collapseTools]);
   const resolvedSessionId = useMemo(() => {
     const meta = registry.get(sessionId);
     if (!meta || getCardType(meta) === 'session') return sessionId;
@@ -183,7 +186,7 @@ export function SessionTranscriptPeek({
             <RichTranscriptView
               sessionId={resolvedSessionId}
               messages={messages}
-              settings={PEEK_SETTINGS}
+              settings={peekSettings}
               persistScrollState={false}
             />
           </div>

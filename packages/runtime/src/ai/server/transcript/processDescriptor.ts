@@ -13,6 +13,7 @@ import type { CanonicalEventDescriptor } from './parsers/IRawMessageParser';
 import type { RawMessage } from './TranscriptTransformer';
 
 const PROMPT_ACTORS = new Set(['human', 'agent', 'system']);
+const PROMPT_MESSAGE_KINDS = new Set(['instruction', 'report', 'status', 'question', 'error']);
 
 /**
  * Copy who sent a prompt from its raw row onto the user_message descriptors it
@@ -22,9 +23,14 @@ const PROMPT_ACTORS = new Set(['human', 'agent', 'system']);
  */
 export function stampPromptSource(desc: CanonicalEventDescriptor, msg: Pick<RawMessage, 'metadata'>): CanonicalEventDescriptor {
   if (desc.type !== 'user_message' || !msg.metadata) return desc;
-  const actor = (msg.metadata.promptProvenance as { actor?: unknown } | undefined)?.actor;
+  const provenance = msg.metadata.promptProvenance as { actor?: unknown; messageKind?: unknown } | undefined;
+  const actor = provenance?.actor;
   if (typeof actor === 'string' && PROMPT_ACTORS.has(actor)) {
     desc.promptActor = actor as 'human' | 'agent' | 'system';
+  }
+  const kind = provenance?.messageKind;
+  if (typeof kind === 'string' && PROMPT_MESSAGE_KINDS.has(kind)) {
+    desc.promptMessageKind = kind as NonNullable<typeof desc.promptMessageKind>;
   }
   const origin = msg.metadata.promptOrigin;
   if (typeof origin === 'string' && origin) desc.promptOrigin = origin;
@@ -76,6 +82,7 @@ export async function processDescriptor(
         createdAt: desc.createdAt,
         promptActor: desc.promptActor,
         promptOrigin: desc.promptOrigin,
+        promptMessageKind: desc.promptMessageKind,
       });
     }
 

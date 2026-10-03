@@ -41,15 +41,24 @@ export function lastTranscriptSequence(messages: TranscriptViewMessage[]): numbe
   return last;
 }
 
+/**
+ * `resolveRow` maps a message index to the row that shows it; pass the row
+ * plan's target when rows fold into bundles. Without it, tool rows resolve to
+ * the assistant row that draws them and the anchor stays on its own row.
+ */
 export function decideTranscriptReturnTarget(
   messages: TranscriptViewMessage[],
   saved: TranscriptReturnState | undefined,
+  resolveRow?: (index: number) => number,
 ): TranscriptReturnTarget {
   if (!saved) return { kind: 'bottom' };
   const news = messages.findIndex(m => m.sequence > saved.lastSequence && isNews(m));
-  if (news >= 0) return { kind: 'news', index: rowIndexOf(messages, news) };
+  if (news >= 0) return { kind: 'news', index: resolveRow ? resolveRow(news) : rowIndexOf(messages, news) };
   if (saved.atBottom || !saved.anchor) return { kind: 'bottom' };
   const anchor = saved.anchor;
   const index = messages.findIndex(m => m.sequence === anchor.sequence);
-  return index < 0 ? { kind: 'bottom' } : { kind: 'anchor', index, offset: anchor.offset };
+  if (index < 0) return { kind: 'bottom' };
+  const row = resolveRow ? resolveRow(index) : index;
+  // An offset inside a row that no longer shows the anchor means nothing.
+  return { kind: 'anchor', index: row, offset: row === index ? anchor.offset : 0 };
 }

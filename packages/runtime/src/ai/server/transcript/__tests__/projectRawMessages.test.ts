@@ -506,15 +506,15 @@ describe('projectRawMessagesToViewMessages', () => {
     });
     const vms = await projectRawMessagesToViewMessages([
       input(1, { promptProvenance: { actor: 'human', origin: 'composer' } }),
-      input(2, { promptProvenance: { actor: 'agent', origin: 'session-orchestration' } }),
+      input(2, { promptProvenance: { actor: 'agent', origin: 'session-orchestration', messageKind: 'report' } }),
       input(3, { promptOrigin: 'interactive-question' }),
       input(4),
     ], 'claude-code');
-    expect(vms.map(vm => [vm.promptActor, vm.promptOrigin])).toEqual([
-      ['human', undefined],
-      ['agent', undefined],
-      [undefined, 'interactive-question'],
-      [undefined, undefined],
+    expect(vms.map(vm => [vm.promptActor, vm.promptOrigin, vm.promptMessageKind])).toEqual([
+      ['human', undefined, undefined],
+      ['agent', undefined, 'report'],
+      [undefined, 'interactive-question', undefined],
+      [undefined, undefined, undefined],
     ]);
   });
 

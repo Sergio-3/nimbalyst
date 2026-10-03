@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, type RefObject } from 'react';
 import type { VListHandle } from 'virtua';
 import type { TranscriptViewMessage } from '../../../ai/server/types';
-import { partitionUnansweredQuestions } from '../../../ai/server/interactivePromptTools';
 import { isToolLikeMessage } from '../utils/messageTypeHelpers';
+import { partitionTranscriptQuestions } from '../utils/transcriptQuestions';
 
 interface PendingQuestion {
   id: string;
@@ -11,9 +11,10 @@ interface PendingQuestion {
 
 // Permission, plan and commit prompts intentionally have separate navigation.
 // A question the user moved past by sending a new message is closed, so only
-// open questions drive the Jump button and auto-scroll.
+// open questions drive the Jump button and auto-scroll. A sub-agent's question
+// targets the row of its sub-agent.
 function findPendingQuestions(messages: TranscriptViewMessage[]): PendingQuestion[] {
-  return partitionUnansweredQuestions(messages).open
+  return partitionTranscriptQuestions(messages).open
     .filter(({ index }) => isToolLikeMessage(messages[index]))
     .map(({ id, index }) => {
       // Target the assistant row that encloses the contiguous tool group.

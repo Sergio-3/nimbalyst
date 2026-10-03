@@ -27,6 +27,13 @@ interface EditToolResultCardProps {
    * its custom editor registry; the runtime does not, so we ask.
    */
   canEmbedFile?: (filePath: string) => boolean;
+  /**
+   * When `onToggleCollapsed` is given, the card gets a chevron and hides its
+   * diffs while `collapsed` is true. The transcript uses this inside a
+   * tool-call bundle; without it the card always shows its diffs.
+   */
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
 }
 
 const resolveEditFilePath = (edit: any, toolMessage: TranscriptViewMessage): string | undefined => {
@@ -64,6 +71,8 @@ export const EditToolResultCard: React.FC<EditToolResultCardProps> = ({
   onOpenFile,
   renderEmbeddedFile,
   canEmbedFile,
+  collapsed = false,
+  onToggleCollapsed,
 }) => {
   const isEmbeddable = (filePath?: string) =>
     typeof filePath === 'string' && !!canEmbedFile?.(filePath);
@@ -108,6 +117,9 @@ export const EditToolResultCard: React.FC<EditToolResultCardProps> = ({
       ))
   ));
 
+  const isCollapsible = !!onToggleCollapsed;
+  const showBody = !(isCollapsible && collapsed);
+
   const handleOpenFile = () => {
     if (firstEditPath && onOpenFile) {
       onOpenFile(firstEditPath);
@@ -115,7 +127,7 @@ export const EditToolResultCard: React.FC<EditToolResultCardProps> = ({
   };
 
   return (
-    <div className="rich-transcript-edit-card rounded bg-nim-secondary border border-nim p-2 flex flex-col gap-2">
+    <div className={`rich-transcript-edit-card rounded bg-nim-secondary border border-nim p-2 flex flex-col gap-2 ${showBody ? '' : 'collapsed'}`}>
       <div className="rich-transcript-edit-card__header flex items-start gap-2">
         <div className="rich-transcript-edit-card__icon w-5 h-5 text-nim-primary shrink-0 p-1 rounded-lg flex items-center justify-center" aria-hidden="true">
           <MaterialSymbol icon={allNewFiles ? "note_add" : "edit"} size={16} />
@@ -159,36 +171,62 @@ export const EditToolResultCard: React.FC<EditToolResultCardProps> = ({
         <span className={`rich-transcript-edit-card__status rich-transcript-edit-card__status--${statusClass} text-[0.7rem] font-semibold py-0.5 px-2 rounded-full uppercase tracking-[0.02em] ${statusClass === 'success' ? 'text-nim-success' : statusClass === 'pending' ? 'text-nim-muted' : 'text-nim-error'}`}>
           {statusLabel}
         </span>
+        {isCollapsible && (
+          <button
+            type="button"
+            className="rich-transcript-edit-card__toggle flex items-center justify-center w-5 h-5 p-0 border-none rounded bg-transparent text-nim-faint cursor-pointer shrink-0 transition-colors duration-150 hover:bg-nim-hover hover:text-nim"
+            onClick={onToggleCollapsed}
+            aria-expanded={!collapsed}
+            title={collapsed ? 'Show changes' : 'Hide changes'}
+            aria-label={collapsed ? 'Show changes' : 'Hide changes'}
+          >
+            <MaterialSymbol icon={collapsed ? 'chevron_right' : 'expand_more'} size={16} />
+          </button>
+        )}
       </div>
 
-      {instruction && (
+      {showBody && instruction && (
         <div className="rich-transcript-edit-card__instruction text-[0.8rem] text-nim-muted bg-nim-tertiary rounded p-2 whitespace-pre-wrap break-words leading-[1.5]">
           {instruction}
         </div>
       )}
 
-      <div className="rich-transcript-edit-card__diffs flex flex-col gap-2">
-        {edits.map((edit, idx) => {
-          const absolutePath = resolveEditFilePath(edit, toolMessage);
-          const relativePath = absolutePath ? toProjectRelative(absolutePath, workspacePath) : undefined;
-          const isSecondaryEmbeddableFile =
-            !!absolutePath &&
-            absolutePath !== firstEditPath &&
-            isEmbeddable(absolutePath);
-          const shouldUseEmbeddedPreview =
-            !!renderEmbeddedFile &&
-            primarySupportsEmbeddedPreview &&
-            isEmbeddable(absolutePath);
+      {showBody && (
+        <div className="rich-transcript-edit-card__diffs flex flex-col gap-2">
+          {edits.map((edit, idx) => {
+            const absolutePath = resolveEditFilePath(edit, toolMessage);
+            const relativePath = absolutePath ? toProjectRelative(absolutePath, workspacePath) : undefined;
+            const isSecondaryEmbeddableFile =
+              !!absolutePath &&
+              absolutePath !== firstEditPath &&
+              isEmbeddable(absolutePath);
+            const shouldUseEmbeddedPreview =
+              !!renderEmbeddedFile &&
+              primarySupportsEmbeddedPreview &&
+              isEmbeddable(absolutePath);
 
-          if (shouldUseEmbeddedPreview || (!primarySupportsEmbeddedPreview && isSecondaryEmbeddableFile)) {
-            return null;
-          }
+            if (shouldUseEmbeddedPreview || (!primarySupportsEmbeddedPreview && isSecondaryEmbeddableFile)) {
+              return null;
+            }
 
-          if (isNewFileEdit(edit)) {
+            if (isNewFileEdit(edit)) {
+              return (
+                <React.Fragment key={`new-${idx}`}>
+                  <NewFilePreview
+                    content={edit.content}
+                    filePath={relativePath || absolutePath}
+                    maxHeight="18rem"
+                    onOpenFile={onOpenFile}
+                    absoluteFilePath={absolutePath}
+                  />
+                </React.Fragment>
+              );
+            }
+
             return (
-              <React.Fragment key={`new-${idx}`}>
-                <NewFilePreview
-                  content={edit.content}
+              <React.Fragment key={`edit-${idx}`}>
+                <DiffViewer
+                  edit={edit}
                   filePath={relativePath || absolutePath}
                   maxHeight="18rem"
                   onOpenFile={onOpenFile}
@@ -196,23 +234,11 @@ export const EditToolResultCard: React.FC<EditToolResultCardProps> = ({
                 />
               </React.Fragment>
             );
-          }
+          })}
+        </div>
+      )}
 
-          return (
-            <React.Fragment key={`edit-${idx}`}>
-              <DiffViewer
-                edit={edit}
-                filePath={relativePath || absolutePath}
-                maxHeight="18rem"
-                onOpenFile={onOpenFile}
-                absoluteFilePath={absolutePath}
-              />
-            </React.Fragment>
-          );
-        })}
-      </div>
-
-      {renderEmbeddedFile && previewFilePaths.length > 0 && (
+      {showBody && renderEmbeddedFile && previewFilePaths.length > 0 && (
         <div className="rich-transcript-edit-card__previews flex flex-col gap-2">
           {previewFilePaths.map((filePath) => (
             <React.Fragment key={filePath}>

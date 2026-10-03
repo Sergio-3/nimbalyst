@@ -57,6 +57,7 @@ export class TranscriptWriter {
       createdAt?: Date;
       promptActor?: UserMessagePayload['promptActor'];
       promptOrigin?: string;
+      promptMessageKind?: UserMessagePayload['promptMessageKind'];
     },
   ): Promise<TranscriptEvent> {
     const payload: UserMessagePayload = {
@@ -65,6 +66,7 @@ export class TranscriptWriter {
       ...(options?.attachments ? { attachments: options.attachments } : {}),
       ...(options?.promptActor ? { promptActor: options.promptActor } : {}),
       ...(options?.promptOrigin ? { promptOrigin: options.promptOrigin } : {}),
+      ...(options?.promptMessageKind ? { promptMessageKind: options.promptMessageKind } : {}),
     };
 
     return this.insertEvent(sessionId, {

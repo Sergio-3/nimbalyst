@@ -134,6 +134,7 @@ describe('partitionUnansweredQuestions', () => {
 
     for (const nonBoundary of [
       { type: 'user_message', text: 'Child finished', promptActor: 'agent' },
+      { type: 'user_message', text: 'Do this next', promptActor: 'agent', promptMessageKind: 'instruction' },
       { type: 'user_message', text: 'Nightly run', promptActor: 'system' },
       // Shown before main persisted it; a failed send leaves it behind.
       { type: 'user_message', text: 'Do something else', optimistic: true },
