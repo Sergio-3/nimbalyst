@@ -577,7 +577,7 @@ function InlineLexicalEditor({ initialText, format, placeholder, onChange, disab
         if (format === 'markdown') {
           $convertFromMarkdownString(initialTextRef.current ?? '', TRANSFORMERS);
         } else {
-          // Plain text: insert as a single paragraph block
+          // Plain text: one paragraph per line; handleChange joins them back with "\n".
           const root = $getRoot();
           root.clear();
           if (initialTextRef.current) {
@@ -603,7 +603,13 @@ function InlineLexicalEditor({ initialText, format, placeholder, onChange, disab
         if (format === 'markdown') {
           text = $convertToMarkdownString(TRANSFORMERS);
         } else {
-          text = $getRoot().getTextContent();
+          // Mirror the seed, which makes one paragraph per "\n" line. Root
+          // getTextContent() joins blocks with "\n\n", so every remount plus
+          // keystroke added a blank line per paragraph break.
+          text = $getRoot()
+            .getChildren()
+            .map((block) => block.getTextContent())
+            .join('\n');
         }
         onChange(text);
       });
