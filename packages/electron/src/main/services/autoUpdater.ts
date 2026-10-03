@@ -1,4 +1,4 @@
-import { autoUpdater } from 'electron-updater';
+import { autoUpdater, type CancellationToken } from 'electron-updater';
 import { app, BrowserWindow, dialog } from 'electron';
 import log from 'electron-log/main';
 import * as fs from 'fs';
@@ -43,8 +43,17 @@ const GITHUB_UPDATE_PROVIDER = {
 // the original call-site name (`getDurationCategory`) in scope.
 const getDurationCategory = categorizeDownloadDuration;
 
+/** The slice of SettingsService that followAutoCheckSetting needs. */
+interface AutoCheckSettingSource {
+  get(key: 'app.autoUpdateCheckEnabled'): boolean;
+  subscribe(fn: (key: string, value: unknown) => void): () => void;
+}
+
 export class AutoUpdaterService {
   private updateCheckInterval: NodeJS.Timeout | null = null;
+  private initialCheckTimeout: NodeJS.Timeout | null = null;
+  // Cancels the download a background check started (autoDownload); see setAutoCheckEnabled.
+  private backgroundDownloadToken: CancellationToken | null = null;
   private isCheckingForUpdate = false;
   private isManualCheck = false; // Track if this is a user-initiated check (for showing up-to-date toast)
   private static isUpdating = false;
@@ -142,6 +151,13 @@ export class AutoUpdaterService {
     });
 
     autoUpdater.on('error', (err) => {
+      // A background download cancelled because automatic checks were switched
+      // off (builder-util-runtime CancellationError) is not a failure to report.
+      if (err?.message === 'cancelled') {
+        log.info('Background update download cancelled');
+        this.isCheckingForUpdate = false;
+        return;
+      }
       log.error('Update error:', err);
       this.isCheckingForUpdate = false;
       // Capture before reset so the suppression below can distinguish
@@ -574,8 +590,11 @@ export class AutoUpdaterService {
   }
 
   public startAutoUpdateCheck(intervalMinutes = 60) {
+    this.stopAutoUpdateCheck();
+
     // Initial check after 30 seconds
-    setTimeout(() => {
+    this.initialCheckTimeout = setTimeout(() => {
+      this.initialCheckTimeout = null;
       this.checkForUpdates();
     }, 30000);
 
@@ -586,10 +605,52 @@ export class AutoUpdaterService {
   }
 
   public stopAutoUpdateCheck() {
+    if (this.initialCheckTimeout) {
+      clearTimeout(this.initialCheckTimeout);
+      this.initialCheckTimeout = null;
+    }
     if (this.updateCheckInterval) {
       clearInterval(this.updateCheckInterval);
       this.updateCheckInterval = null;
     }
+  }
+
+  /**
+   * Apply the "Automatically check for updates" setting (#1339). Off stops the
+   * launch check and the hourly poll; the manual "Check for Updates" menu item
+   * keeps working. Safe to call repeatedly -- on while already running is a no-op.
+   *
+   * Off also cancels a download the background check already started, and
+   * turns off install-on-quit: electron-updater never cancels that download
+   * itself, and on macOS it hands a finished download straight to Squirrel when
+   * autoInstallOnAppQuit is set. "Restart to install" after a manual check
+   * still works -- quitAndInstall() fetches from Squirrel on demand.
+   */
+  public setAutoCheckEnabled(enabled: boolean) {
+    autoUpdater.autoInstallOnAppQuit = enabled;
+    if (!enabled) {
+      if (this.updateCheckInterval || this.initialCheckTimeout) {
+        log.info('Automatic update checks disabled by setting');
+      }
+      this.stopAutoUpdateCheck();
+      if (this.backgroundDownloadToken) {
+        log.info('Cancelling background update download');
+        this.backgroundDownloadToken.cancel();
+        this.backgroundDownloadToken = null;
+      }
+      return;
+    }
+    if (this.updateCheckInterval) return;
+    log.info('Starting automatic update checks');
+    this.startAutoUpdateCheck(60); // Check every hour
+  }
+
+  /** Apply `app.autoUpdateCheckEnabled` now and on every later change. Missing counts as on. */
+  public followAutoCheckSetting(settings: AutoCheckSettingSource): () => void {
+    this.setAutoCheckEnabled(settings.get('app.autoUpdateCheckEnabled') !== false);
+    return settings.subscribe((key, value) => {
+      if (key === 'app.autoUpdateCheckEnabled') this.setAutoCheckEnabled(value !== false);
+    });
   }
 
   public static isUpdatingApp(): boolean {
@@ -604,7 +665,17 @@ export class AutoUpdaterService {
 
     try {
       log.info('Checking for updates...');
-      await autoUpdater.checkForUpdatesAndNotify();
+      const result = await autoUpdater.checkForUpdatesAndNotify();
+      const token = result?.cancellationToken;
+      if (token && result?.downloadPromise) {
+        this.backgroundDownloadToken = token;
+        // Forget the token once the download settles. Handling the rejection here
+        // also covers the cancellation, which electron-updater reports by rejecting.
+        const settle = () => {
+          if (this.backgroundDownloadToken === token) this.backgroundDownloadToken = null;
+        };
+        result.downloadPromise.then(settle, settle);
+      }
     } catch (error) {
       log.error('Failed to check for updates:', error);
     }

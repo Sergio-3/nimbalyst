@@ -259,6 +259,12 @@ export const SETTINGS_REGISTRY = {
     { store: 'app-settings', path: 'externalSessionFollowEnabled' },
     false,
   ),
+  /** Background update checks (launch + hourly). Off leaves only the manual menu check (#1339). */
+  'app.autoUpdateCheckEnabled': setting(
+    z.boolean(),
+    { store: 'app-settings', path: 'autoUpdateCheckEnabled' },
+    true,
+  ),
   /** Width (px) of the gutter's agent sessions attention popover. */
   'agent.sessionsPopoverWidth': setting(
     z.number(),

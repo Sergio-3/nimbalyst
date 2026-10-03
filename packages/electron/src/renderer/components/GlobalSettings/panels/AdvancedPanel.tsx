@@ -26,6 +26,7 @@ import {
   trackerAutomationAtom,
   setTrackerAutomationAtom,
 } from '../../../store/atoms/trackerAutomationAtoms';
+import { settingAtom } from '../../../store/atoms/settingAtomFamily';
 import {
   multiProjectModeAtom,
   openProjectsAtom,
@@ -79,6 +80,7 @@ function DropdownRow({
  */
 export function AdvancedPanel() {
   const posthog = usePostHog();
+  const [autoUpdateCheckEnabled, setAutoUpdateCheckEnabled] = useAtom(settingAtom('app.autoUpdateCheckEnabled'));
   // App-level advanced settings from Jotai atoms
   const [settings] = useAtom(advancedSettingsAtom);
   const [, updateSettings] = useAtom(setAdvancedSettingsAtom);
@@ -383,6 +385,14 @@ export function AdvancedPanel() {
             <option value="alpha">Alpha (Developer Releases)</option>
           </select>
         </div>
+
+        <SettingsToggle
+          checked={autoUpdateCheckEnabled}
+          onChange={setAutoUpdateCheckEnabled}
+          name="Automatically check for updates"
+          description="Check for and download new releases in the background at launch and every hour. When off, use Check for Updates in the menu."
+          testId="auto-update-check-setting"
+        />
 
         {releaseChannel === 'alpha' && (
           <div className="mt-3 flex items-start gap-2 p-3 rounded border border-[var(--nim-warning)]/30 bg-[var(--nim-warning)]/10">
