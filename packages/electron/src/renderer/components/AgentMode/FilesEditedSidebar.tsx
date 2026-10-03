@@ -58,6 +58,7 @@ import { TodoPanel } from './TodoPanel';
 import { TaskListPanel } from './TaskListPanel';
 import { TeammatePanel } from './TeammatePanel';
 import { TrackerPanel } from './TrackerPanel';
+import { settingAtom } from '../../store/atoms/settingAtomFamily';
 
 // Keep cached predicates outside the panel's render scope: old predicates
 // must not retain previous callbacks and their session-message props.
@@ -119,6 +120,8 @@ export const FilesEditedSidebar: React.FC<FilesEditedSidebarProps> = React.memo(
   isGitRepo = false,
 }) => {
   const effectiveWorkspacePath = worktreePath || workspacePath;
+  const showSessionEdits = useAtomValue(settingAtom('agent.sidebar.showSessionEdits')) !== false;
+  const showCommitPanel = useAtomValue(settingAtom('agent.sidebar.showCommitPanel')) !== false;
   // Get all session IDs in this workstream (must be declared before useEffects that use it)
   const workstreamSessions = useAtomValue(workstreamSessionsAtom(workstreamId));
   const hasMultipleSessions = workstreamSessions.length > 1;
@@ -562,8 +565,12 @@ export const FilesEditedSidebar: React.FC<FilesEditedSidebarProps> = React.memo(
   };
 
   return (
-    <div className="files-edited-sidebar shrink-0 flex flex-col h-full bg-[var(--nim-bg-secondary)]" style={{ width }}>
+    // overflow-y-auto: the panels below the file list do not shrink, so once they
+    // outgrow the window the sidebar scrolls instead of clipping them. The file
+    // list (flex-1, overflow-hidden) still gives up its space first.
+    <div className="files-edited-sidebar shrink-0 flex flex-col h-full overflow-y-auto bg-[var(--nim-bg-secondary)]" style={{ width }}>
       <ShellTrackingNotice sessionIds={filterToCurrentSession && activeSessionId ? [activeSessionId] : [workstreamId, ...workstreamSessions]} />
+      {showSessionEdits && (
       <div className="files-edited-sidebar__header flex items-center gap-2 px-3 py-2 border-b border-[var(--nim-border)] bg-[var(--nim-bg-secondary)] shrink-0">
         <FilesScopeDropdown
           fileScopeMode={fileScopeMode}
@@ -604,6 +611,7 @@ export const FilesEditedSidebar: React.FC<FilesEditedSidebarProps> = React.memo(
           </button>
         </div>
       </div>
+      )}
 
       {/* Keep All button - show when there are pending files (only in non-git repos) */}
       {!isGitRepo && pendingReviewFiles.size > 0 && (
@@ -627,8 +635,10 @@ export const FilesEditedSidebar: React.FC<FilesEditedSidebarProps> = React.memo(
         </div>
       )}
 
-      {/* Files Content */}
-      <div className="files-edited-sidebar__content flex-1 overflow-hidden flex flex-col">
+      {/* Files Content -- when hidden, the panels below move up and the free
+          space collects at the bottom instead of above them. */}
+      {showSessionEdits && (
+      <div className="files-edited-sidebar__content flex-1 min-h-[160px] overflow-hidden flex flex-col">
         <div className="flex-1 overflow-auto">
           <FileEditsSidebarComponent
             fileEdits={fileEdits}
@@ -662,8 +672,10 @@ export const FilesEditedSidebar: React.FC<FilesEditedSidebarProps> = React.memo(
           />
         </div>
       </div>
+      )}
 
       {/* Git Operations Panel */}
+      {showCommitPanel && (
       <GitOperationsPanel
         workspacePath={workspacePath}
         workstreamId={workstreamId}
@@ -674,6 +686,7 @@ export const FilesEditedSidebar: React.FC<FilesEditedSidebarProps> = React.memo(
         onWorktreeArchived={onWorktreeArchived}
         onFileClick={onFileClick}
       />
+      )}
 
       {/* Todo Panel - shows agent's current tasks */}
       {activeSessionId && (

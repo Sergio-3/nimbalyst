@@ -108,7 +108,7 @@ export const TrackerPanel: React.FC<TrackerPanelProps> = React.memo(({
 
       {/* Content */}
       {!isCollapsed && (
-        <div className="tracker-panel-content px-2 pb-2 max-h-[200px] overflow-y-auto">
+        <div className="tracker-panel-content px-2 pb-2 max-h-[320px] overflow-y-auto">
           <div className="flex flex-col gap-0.5">
             {linkedItemIds.map((itemId) => (
               <TrackerItemRow

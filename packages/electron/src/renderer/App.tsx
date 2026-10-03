@@ -188,6 +188,7 @@ import { resolveCreateAction, type CreateKind } from '../shared/createActions';
 import { titleBarCreateMenusAtom } from './store/atoms/titleBarCreate';
 import { AccountExpiryBanner } from './components/Accounts/AccountExpiryBanner';
 import { organizationDirectoryAtom, personalAccountsAtom } from './store/atoms/settingsDomains';
+import { settingAtom } from './store/atoms/settingAtomFamily';
 import {
   activeWorkspacePathAtom,
   multiProjectModeAtom,
@@ -670,6 +671,9 @@ export default function App() {
   const setActiveMode = useSetAtom(setWindowModeAtom);
   const toggleAgentCollapsed = useSetAtom(toggleSessionHistoryCollapsedAtom);
   const agentHistoryCollapsed = useAtomValue(sessionHistoryCollapsedAtom);
+  // App-wide choice between the 'Edited Files' and 'Tasks & Agents' sidebar entries.
+  const showSessionEdits = useAtomValue(settingAtom('agent.sidebar.showSessionEdits')) !== false;
+  const setShowSessionEdits = useSetAtom(settingAtom('agent.sidebar.showSessionEdits'));
   const toggleTrackerCollapsed = useSetAtom(toggleTrackerSidebarCollapsedAtom);
   const trackerSidebarCollapsed = useAtomValue(trackerSidebarCollapsedAtom);
   const filesSidebarCollapsed = useAtomValue(sidebarCollapsedAtomFamily(workspacePath || ''));
@@ -1243,7 +1247,12 @@ export default function App() {
           // No 'Hidden' entry: the split button's toggle half hides the panel,
           // and the selection stays marked while hidden so re-showing restores
           // the last-used mode.
-          options: agentRightPanelOptions(agentPanelState.mode, (mode) => agentModeRef.current?.showRightPanel(mode)),
+          options: agentRightPanelOptions(
+            agentPanelState.mode,
+            showSessionEdits,
+            (mode) => agentModeRef.current?.showRightPanel(mode),
+            (show) => { void setShowSessionEdits(show); },
+          ),
         } : undefined,
       };
     }
@@ -1294,6 +1303,8 @@ export default function App() {
     fullscreenPanelPaneControls,
     isFullscreenPanelActive,
     prPanelState,
+    setShowSessionEdits,
+    showSessionEdits,
     toggleActiveLeftPane,
     toggleActiveRightPane,
     trackerSidebarCollapsed,

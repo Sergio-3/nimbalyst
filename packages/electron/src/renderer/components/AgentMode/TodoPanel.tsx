@@ -74,7 +74,7 @@ export const TodoPanel: React.FC<TodoPanelProps> = React.memo(({
 
       {/* Content */}
       {!isCollapsed && (
-        <div className="todo-panel-content px-3 pb-2 max-h-[200px] overflow-y-auto">
+        <div className="todo-panel-content px-3 pb-2 max-h-[320px] overflow-y-auto">
           <div className="flex flex-col gap-1">
             {todos.map((todo, index) => (
               <TodoItem key={index} todo={todo} />

@@ -135,7 +135,7 @@ const TeammateSection: React.FC<TeammateSectionProps> = React.memo(({
       </button>
 
       {!isCollapsed && (
-        <div className="px-3 pb-2 max-h-[200px] overflow-y-auto">
+        <div className="px-3 pb-2 max-h-[320px] overflow-y-auto">
           <div className="flex flex-col gap-1">
             {entries.map((entry) => (
               <TeammateItem key={entry.agentId} teammate={entry} onClick={onTeammateClick} />
@@ -185,7 +185,7 @@ const TaskSection: React.FC<TaskSectionProps> = React.memo(({
       </button>
 
       {!isCollapsed && (
-        <div className="px-3 pb-2 max-h-[200px] overflow-y-auto">
+        <div className="px-3 pb-2 max-h-[320px] overflow-y-auto">
           <div className="flex flex-col gap-1">
             {tasks.map((task) => (
               <TaskItem key={task.taskId} task={task} />

@@ -286,6 +286,22 @@ export const SETTINGS_REGISTRY = {
     { store: 'app-settings', path: 'teamMessages.density' },
     'comfortable',
   ),
+  /**
+   * Agent session right sidebar: the edited-files list with its scope header.
+   * Written by the right-panel mode menu ("Edited Files" = true, "Tasks &
+   * Agents" = false); app-wide, unlike the per-workstream panel mode.
+   */
+  'agent.sidebar.showSessionEdits': setting(
+    z.boolean(),
+    { store: 'app-settings', path: 'agentSidebar.showSessionEdits' },
+    true,
+  ),
+  /** Agent session right sidebar: the git commit panel. */
+  'agent.sidebar.showCommitPanel': setting(
+    z.boolean(),
+    { store: 'app-settings', path: 'agentSidebar.showCommitPanel' },
+    true,
+  ),
 } as const;
 
 export type SettingKey = keyof typeof SETTINGS_REGISTRY;

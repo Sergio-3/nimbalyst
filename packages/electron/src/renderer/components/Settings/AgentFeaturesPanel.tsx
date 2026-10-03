@@ -47,6 +47,7 @@ export function AgentFeaturesPanel() {
   const [showMcpSessionStatus, setShowMcpSessionStatus] = useAtom(
     settingAtom('ai.showMcpSessionStatus'),
   ) as [boolean, (value: boolean) => void];
+  const [showCommitPanel, setShowCommitPanel] = useAtom(settingAtom('agent.sidebar.showCommitPanel'));
 
   const [aiDebugSettings] = useAtom(aiDebugSettingsAtom);
   const [, updateAIDebugSettings] = useAtom(setAIDebugSettingsAtom);
@@ -265,6 +266,14 @@ export function AgentFeaturesPanel() {
           name="Show MCP Server Status"
           description="Show a chip in the session header listing this session's MCP servers, which are connected, and which never reached it."
           testId="show-mcp-session-status-toggle"
+        />
+
+        <SettingsToggle
+          checked={showCommitPanel}
+          onChange={setShowCommitPanel}
+          name="Show Commit Panel"
+          description="Show the git panel (commit, history and worktree actions) in the agent sidebar, in both Edited Files and Tasks & Agents. Manual commits select their files in the Edited Files view; Smart commits work without it."
+          testId="show-commit-panel-toggle"
         />
 
         <div className="agent-preferred-language flex items-start justify-between gap-4 py-3">

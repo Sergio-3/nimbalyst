@@ -72,7 +72,7 @@ export const TaskListPanel: React.FC<TaskListPanelProps> = React.memo(({
 
       {/* Content */}
       {!isCollapsed && (
-        <div className="task-list-panel-content px-3 pb-2 max-h-[240px] overflow-y-auto">
+        <div className="task-list-panel-content px-3 pb-2 max-h-[384px] overflow-y-auto">
           <div className="flex flex-col gap-1">
             {tasks.map((task) => (
               <TaskRow key={task.id} task={task} openIds={openIds} />
