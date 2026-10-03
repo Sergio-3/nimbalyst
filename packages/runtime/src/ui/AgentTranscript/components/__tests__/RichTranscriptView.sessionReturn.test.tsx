@@ -1,6 +1,6 @@
 import React from 'react';
 import { act, render } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TranscriptViewMessage } from '../../../../ai/server/transcript/TranscriptProjector';
 import { RichTranscriptView } from '../RichTranscriptView';
 import { setSessionReturnState } from '../../../../store/atoms/transcriptScroll';
@@ -11,15 +11,23 @@ const vlist = vi.hoisted(() => ({
   scrollBy: vi.fn(),
   onScroll: undefined as ((offset: number) => void) | undefined,
   rowCount: 0,
+  bufferSize: undefined as number | undefined,
+  // scrollToIndex calls already made each time the list's passive effects ran;
+  // a placement made before them was made before the browser could paint.
+  callsAtPassiveEffects: [] as number[],
 }));
 
 vi.mock('virtua', async () => {
   const ReactModule = await import('react');
   return {
-    VList: ReactModule.forwardRef(({ children, onScroll }: { children: React.ReactNode; onScroll?: (offset: number) => void }, ref) => {
+    VList: ReactModule.forwardRef(({ children, onScroll, bufferSize }: { children: React.ReactNode; onScroll?: (offset: number) => void; bufferSize?: number }, ref) => {
       const rows = ReactModule.Children.toArray(children);
       vlist.rowCount = rows.length;
       vlist.onScroll = onScroll;
+      vlist.bufferSize = bufferSize;
+      ReactModule.useEffect(() => {
+        vlist.callsAtPassiveEffects.push(vlist.scrollToIndex.mock.calls.length);
+      });
       ReactModule.useImperativeHandle(ref, () => ({
         cache: undefined,
         scrollOffset: 0,
@@ -162,5 +170,115 @@ describe('RichTranscriptView returning to a session', () => {
     expect(vlist.scrollBy).not.toHaveBeenCalled();
     expect(vlist.scrollToIndex).not.toHaveBeenCalledWith(expect.anything(), { align: 'start' });
     expect(vlist.scrollToIndex).toHaveBeenLastCalledWith(11, { align: 'end' });
+  });
+
+  it('remembers each session under its own id when the same view switches sessions', () => {
+    // B left on row 7 + 40px, A on row 3 + 40px, then the view moves on to B.
+    visitAndLeave('switch-b', history, 740);
+    const view = show('switch-a', history);
+    act(() => vlist.onScroll?.(340));
+    view.rerender(<RichTranscriptView sessionId="switch-b" sessionStatus="idle" messages={history} provider="claude-code" />);
+    flushFrames();
+    view.unmount();
+    vlist.scrollToIndex.mockClear();
+
+    show('switch-a', history);
+    expect(vlist.scrollToIndex).toHaveBeenCalledTimes(1);
+    expect(vlist.scrollToIndex).toHaveBeenCalledWith(3, { align: 'start', offset: 40 });
+  });
+});
+
+// Opening a long session used to mount a 10 000 px buffer of rows at index 0,
+// then the same again at the bottom one frame later; none of the first batch
+// was ever on screen.
+describe('RichTranscriptView placing a session it opens', () => {
+  let frames: Map<number, FrameRequestCallback>;
+  let nextFrame: number;
+  const flushFrame = () => act(() => {
+    const callbacks = [...frames.values()];
+    frames.clear();
+    callbacks.forEach(callback => callback(0));
+  });
+  const isScrollReady = (container: HTMLElement) => container.querySelector('.rich-transcript-messages-wrapper.scroll-ready') !== null;
+
+  beforeEach(() => {
+    frames = new Map();
+    nextFrame = 0;
+    vlist.scrollToIndex.mockReset();
+    vlist.callsAtPassiveEffects = [];
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.stubGlobal('CSS', { highlights: { delete: vi.fn(), set: vi.fn() } });
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
+  });
+  const originalIntersectionObserver = globalThis.IntersectionObserver;
+  afterEach(() => {
+    vi.useRealTimers();
+    globalThis.IntersectionObserver = originalIntersectionObserver;
+  });
+
+  it('scrolls to the target at mount and widens the buffer only after the ready frame painted', () => {
+    const view = render(<RichTranscriptView sessionId="place-a" sessionStatus="idle" messages={history} provider="claude-code" />);
+    // Placed before the first frame, so the first measured render is the bottom.
+    expect(vlist.scrollToIndex).toHaveBeenCalledWith(9, { align: 'end' });
+    // ...and within the commit, before any passive effect (i.e. before paint).
+    expect(vlist.callsAtPassiveEffects[0]).toBe(1);
+    const settlingBuffer = vlist.bufferSize!;
+
+    for (let i = 0; i < 3 && !isScrollReady(view.container); i++) flushFrame();
+    expect(isScrollReady(view.container)).toBe(true);
+    // The ready frame still renders the narrow range.
+    flushFrame();
+    expect(vlist.bufferSize).toBe(settlingBuffer);
+    act(() => vi.runOnlyPendingTimers());
+    const fullBuffer = vlist.bufferSize!;
+    expect(fullBuffer).toBeGreaterThan(settlingBuffer);
+
+    // Switching sessions in place starts narrow again from its first render.
+    vlist.scrollToIndex.mockClear();
+    vlist.callsAtPassiveEffects = [];
+    view.rerender(<RichTranscriptView sessionId="place-b" sessionStatus="idle" messages={history} provider="claude-code" />);
+    expect(vlist.bufferSize).toBe(settlingBuffer);
+    expect(vlist.scrollToIndex).toHaveBeenCalledWith(9, { align: 'end' });
+    expect(vlist.callsAtPassiveEffects[0]).toBe(1);
+    for (let i = 0; i < 6; i++) flushFrame();
+    act(() => vi.runOnlyPendingTimers());
+    expect(vlist.bufferSize).toBe(fullBuffer);
+  });
+
+  it('starts narrow again when the same session is hidden and shown again', () => {
+    let reportVisible: ((visible: boolean) => void) | undefined;
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(callback: (entries: Array<{ isIntersecting: boolean }>) => void) {
+        reportVisible = visible => callback([{ isIntersecting: visible }]);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+      takeRecords() { return []; }
+    });
+    render(<RichTranscriptView sessionId="place-c" sessionStatus="idle" messages={history} provider="claude-code" />);
+    const settlingBuffer = vlist.bufferSize!;
+    for (let i = 0; i < 6; i++) flushFrame();
+    act(() => vi.runOnlyPendingTimers());
+    const fullBuffer = vlist.bufferSize!;
+    expect(fullBuffer).toBeGreaterThan(settlingBuffer);
+
+    // Mode switch away and back: the list remounts, and must not do so wide.
+    act(() => reportVisible!(false));
+    act(() => reportVisible!(true));
+    expect(vlist.bufferSize).toBe(settlingBuffer);
+    for (let i = 0; i < 6; i++) flushFrame();
+    act(() => vi.runOnlyPendingTimers());
+    expect(vlist.bufferSize).toBe(fullBuffer);
+  });
+
+  it('shows an empty session that is already running at once', () => {
+    // No messages yet, but the thinking row renders the list.
+    const view = render(<RichTranscriptView sessionId="place-empty" sessionStatus="running" messages={[]} provider="claude-code" />);
+    expect(isScrollReady(view.container)).toBe(true);
   });
 });

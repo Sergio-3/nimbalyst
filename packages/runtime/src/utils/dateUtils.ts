@@ -174,6 +174,30 @@ export function isToday(date: Date, reference: Date = new Date()): boolean {
   return isSameCalendarDay(date, reference);
 }
 
+// Same output as toLocaleTimeString() / toLocaleString(undefined, ...), but
+// built once: toLocaleString with options constructs a new Intl formatter per
+// call, which adds up across every row of a long transcript.
+const MESSAGE_TIME_OPTIONS: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: 'numeric', second: 'numeric' };
+const MESSAGE_DATE_TIME_OPTIONS: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+const messageTimeFormatters = new Map<string, Intl.DateTimeFormat>();
+
+// A formatter captures the time zone it was built in, so the key names the
+// zone: the date's offset plus the offsets on 1 Jan and 1 Jul of its year.
+// The date's offset alone mixes zones up (Berlin in winter = London in
+// summer). Reading the zone from resolvedOptions() would build the very
+// formatter per call this cache avoids.
+function messageTimeFormatter(kind: 'time' | 'dateTime', date: Date): Intl.DateTimeFormat {
+  const year = date.getFullYear();
+  const zone = `${new Date(year, 0, 1).getTimezoneOffset()}/${new Date(year, 6, 1).getTimezoneOffset()}`;
+  const key = `${kind}:${date.getTimezoneOffset()}:${zone}`;
+  let formatter = messageTimeFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(undefined, kind === 'time' ? MESSAGE_TIME_OPTIONS : MESSAGE_DATE_TIME_OPTIONS);
+    messageTimeFormatters.set(key, formatter);
+  }
+  return formatter;
+}
+
 /**
  * Format a timestamp for message display:
  * - If today: shows time only (e.g., "3:45:30 PM")
@@ -185,15 +209,7 @@ export function formatMessageTime(timestamp: number | string | Date | undefined 
   if (!date) return '';
 
   try {
-    if (isToday(date)) {
-      return date.toLocaleTimeString();
-    }
-    return date.toLocaleString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit'
-    });
+    return messageTimeFormatter(isToday(date) ? 'time' : 'dateTime', date).format(date);
   } catch {
     return '';
   }

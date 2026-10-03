@@ -1,5 +1,5 @@
 import type { JSX } from 'react';
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import { VList, type VListHandle, type CacheSnapshot } from 'virtua';
 import type { TranscriptViewMessage, SessionData } from '../../../ai/server/types';
 import type { ToolCallDiffLoadResult } from '../../../ai/server/transcript';
@@ -599,6 +599,10 @@ const EDIT_TOOL_NAMES = new Set([
 const TRANSCRIPT_BOTTOM_THRESHOLD_PX = 50;
 const DESKTOP_TRANSCRIPT_BUFFER_PX = 10000;
 const MOBILE_TRANSCRIPT_BUFFER_PX = 800;
+// Mounting the full desktop buffer is most of the cost of opening a long
+// session, so the view is placed with about a screen of buffer and widened
+// once the placed rows have painted.
+const SETTLING_TRANSCRIPT_BUFFER_PX = 800;
 
 export function isTranscriptAtBottom(distanceFromBottom: number): boolean {
   return distanceFromBottom < TRANSCRIPT_BOTTOM_THRESHOLD_PX;
@@ -1290,10 +1294,7 @@ export const RichTranscriptView = React.forwardRef<
     persistScrollState ? getSessionIsAtBottom(sessionId) : true
   );
 
-  // Desktop gets a wider buffer to reduce row churn near selection;
-  // iOS WKWebView uses a smaller buffer for memory pressure.
   const isMobileWebKit = useMemo(() => isAppleMobileWebKit(), []);
-  const vlistBufferSize = isMobileWebKit ? MOBILE_TRANSCRIPT_BUFFER_PX : DESKTOP_TRANSCRIPT_BUFFER_PX;
 
   const { pendingPermissionIndices, pendingPermissionsVisibleRef, showPermissionBanner, setShowPermissionBanner } =
     usePendingPermissionNavigation({ messages, sessionId, sessionStatus, isProcessing, currentTeammates, vlistRef });
@@ -1602,20 +1603,32 @@ export const RichTranscriptView = React.forwardRef<
   // Top visible row while shown; written by onScroll, saved on leave.
   const anchorRef = useRef<TranscriptReturnState['anchor']>(null);
 
+  // Each placement of the view starts on the narrow buffer; the full desktop
+  // buffer (row stability near a selection) belongs to the placement it was
+  // widened for, so a session switch never mounts the wide range at index 0.
+  const placementKey = `${sessionId}:${isContainerVisible}:${hasMessages}`;
+  const [widenedPlacement, setWidenedPlacement] = useState<string | null>(null);
+  const vlistBufferSize = isMobileWebKit
+    ? MOBILE_TRANSCRIPT_BUFFER_PX // iOS WKWebView: memory pressure
+    : widenedPlacement === placementKey ? DESKTOP_TRANSCRIPT_BUFFER_PX : SETTLING_TRANSCRIPT_BUFFER_PX;
+
   // Reset scroll-ready state when session changes, container hides, or the
   // first messages arrive (the restore below then runs behind opacity:0).
-  useEffect(() => {
+  // Layout effect, so it stays ordered before the placement below.
+  useLayoutEffect(() => {
     setIsScrollReady(false);
+    setWidenedPlacement(null);
   }, [sessionId, isContainerVisible, hasMessages]);
 
   // Place the view when the session is shown: first new message since the
   // last visit, else bottom if it was left there, else the remembered row.
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isContainerVisible) return;
 
     if (!hasMessages) {
       // Empty session is ready immediately
       setIsScrollReady(true);
+      setWidenedPlacement(placementKey);
       return;
     }
 
@@ -1626,26 +1639,40 @@ export const RichTranscriptView = React.forwardRef<
     // Keep the bottom-follow effect below from overriding the restore.
     if (target.kind !== 'bottom') setAtBottomState(false);
 
-    // Single RAF: wrapper is opacity:0 until scroll-ready, so intermediate state is invisible.
-    // With itemSize hint + cache, VList can estimate scroll position accurately on first try.
+    // Scroll before the list's first measured render, not a frame later:
+    // virtua sizes its viewport in the next frame and renders the rows around
+    // the offset it has then, so the first rows mounted are the target's
+    // instead of index 0. It re-aligns as the rows measure.
+    if (target.kind === 'bottom') {
+      vlistRef.current?.scrollToIndex(messages.length - 1, { align: 'end' });
+    } else if (target.kind === 'news') {
+      vlistRef.current?.scrollToIndex(target.index, { align: 'start' });
+    } else {
+      vlistRef.current?.scrollToIndex(target.index, { align: 'start', offset: target.offset });
+    }
+
+    // Wrapper is opacity:0 until scroll-ready, so intermediate state is invisible.
+    // Widen the buffer only after the ready frame painted.
     let frame: number;
+    let widenTimer: ReturnType<typeof setTimeout> | undefined;
     frame = requestAnimationFrame(() => {
-      if (target.kind === 'bottom') {
-        vlistRef.current?.scrollToIndex(messages.length - 1, { align: 'end' });
-      } else if (target.kind === 'news') {
-        vlistRef.current?.scrollToIndex(target.index, { align: 'start' });
-      } else {
-        vlistRef.current?.scrollToIndex(target.index, { align: 'start', offset: target.offset });
-      }
       frame = requestAnimationFrame(() => {
         setIsScrollReady(true);
+        frame = requestAnimationFrame(() => {
+          widenTimer = setTimeout(() => setWidenedPlacement(placementKey), 0);
+        });
       });
     });
-    return () => cancelAnimationFrame(frame);
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(widenTimer);
+    };
   }, [sessionId, isContainerVisible, hasMessages]); // Re-run when session changes or container becomes visible
 
   // Remember the position and the last message when the transcript is left.
-  useEffect(() => {
+  // Layout effect: its cleanup runs before the placement above writes the
+  // next session's anchor, so the leaving session saves its own position.
+  useLayoutEffect(() => {
     if (!persistScrollState || !isContainerVisible || !isScrollReady) return;
     return () => {
       const lastSequence = lastTranscriptSequence(latestMessagesRef.current);
