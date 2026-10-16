@@ -73,8 +73,11 @@ export async function persistInteractivePromptTerminalResult(args: {
   answers: Record<string, unknown>;
   cancelled: boolean;
   respondedBy?: 'desktop' | 'mobile';
-  /** Why a cancelled prompt closed; `superseded` renders as "Question Skipped". */
-  reason?: 'superseded';
+  /**
+   * Why a cancelled prompt closed; both render as skipped. `superseded`: the
+   * user sent a new message. `replaced`: the agent asked again.
+   */
+  reason?: 'superseded' | 'replaced';
   /** Raw-log source; defaults to the Claude row the question paths share. */
   source?: string;
 }): Promise<void> {

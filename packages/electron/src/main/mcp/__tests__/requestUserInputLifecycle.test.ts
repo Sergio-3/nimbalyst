@@ -20,6 +20,7 @@ const { ipcMainStub, windowSends, mocks } = await vi.hoisted(async () => {
       queue: new Map<string, any>(),
       queueCreate: hoistedVi.fn(async (row: any) => row),
       drive: hoistedVi.fn(async (_sessionId: string, _workspacePath: string) => ({ kind: 'dispatched' as const })),
+      viewMessages: [] as unknown[],
     },
   };
 });
@@ -100,6 +101,10 @@ vi.mock('@nimbalyst/runtime/ai/server/SessionStateManager', () => ({
 vi.mock('@nimbalyst/runtime/storage/repositories/AISessionsRepository', () => ({
   AISessionsRepository: { get: async () => ({ provider: 'claude-code', workspacePath: '/workspace' }) },
 }));
+// The transcript as the renderer sees it; empty unless a test shows forms.
+vi.mock('../../utils/transcriptHelpers', () => ({
+  loadViewMessages: async () => ({ success: true, messages: mocks.viewMessages }),
+}));
 
 import {
   buildCodexToolLookupId,
@@ -118,6 +123,7 @@ import {
 } from '../tools/interactiveToolHandlers';
 import { registerSessionPromptResponseHandler } from '../../ipc/sessionPromptResponseHandler';
 import { configureRequestUserInputResumption } from '../../services/ai/requestUserInputResumption';
+import { clearTerminalizedAskUserQuestions } from '../../services/ai/askUserQuestionFallbackResolution';
 import { openSseMcpConnection, type SseMcpConnection } from './sseMcpConnection';
 
 const ipc = new EventEmitter();
@@ -553,6 +559,84 @@ describe('PromptForUserInput after its MCP connection dropped', () => {
       mocks.list.mockReset();
       mocks.list.mockResolvedValue([]);
     }
+  });
+
+  // The agent got "Connection closed" for the dropped form and asks again. The
+  // dropped form must close then, or the user fills in a form nobody takes.
+  describe('when the agent asks again', () => {
+    const form = (id: string) => ({
+      type: 'tool_call',
+      toolCall: { toolName: 'mcp__nimbalyst__PromptForUserInput', providerToolCallId: id },
+    });
+    const pending: Array<Promise<unknown>> = [];
+
+    function askAgain(toolUseId: string) {
+      mocks.viewMessages = [form('toolu_X'), form(toolUseId)];
+      pending.push(handleRequestUserInput(
+        { fields: [{ type: 'singleSelect', id: 'farbe', label: 'Farbe', options: [{ id: 'rot', label: 'Rot' }] }] },
+        sessionId,
+        undefined,
+        { params: { _meta: { 'claudecode/toolUseId': toolUseId } } },
+      ));
+    }
+
+    const replacedRows = () => mocks.create.mock.calls
+      .map(([row]) => JSON.parse(String(row.content)))
+      .filter((content) => content.type === 'nimbalyst_tool_result' && JSON.parse(content.result).reason === 'replaced')
+      .map((content) => content.tool_use_id);
+
+    afterEach(async () => {
+      ipcMainStub.emit(`request-user-input-response:${sessionId}:toolu_Y`, {}, { cancelled: true });
+      await Promise.all(pending.splice(0));
+      mocks.viewMessages = [];
+      configureRequestUserInputResumption(undefined as any);
+      // A form closed by one test must not count as closed in the next.
+      clearTerminalizedAskUserQuestions(sessionId);
+    });
+
+    it('closes the dropped form as replaced', async () => {
+      await openPromptAndDropConnection('toolu_X');
+      windowSends.length = 0;
+      askAgain('toolu_Y');
+
+      await vi.waitFor(() => expect(replacedRows()).toEqual(['toolu_X']), { timeout: 2000 });
+      expect(windowSends).toContainEqual({
+        channel: 'ai:message-logged',
+        payload: expect.objectContaining({ sessionId }),
+      });
+    });
+
+    it('closes the dropped form when the agent asks again with AskUserQuestion', async () => {
+      await openPromptAndDropConnection('toolu_X');
+      mocks.viewMessages = [form('toolu_X')];
+      const question = handleAskUserQuestion(
+        { questions: [{ header: 'Pick', question: 'Which one?', options: [{ label: 'A', description: 'the first one' }] }] },
+        sessionId,
+        { params: { _meta: { 'claudecode/toolUseId': 'toolu_Q' } } },
+      );
+
+      await vi.waitFor(() => expect(replacedRows()).toEqual(['toolu_X']), { timeout: 2000 });
+      ipcMainStub.emit(`ask-user-question-response:${sessionId}:toolu_Q`, {}, { cancelled: true });
+      await question;
+    });
+
+    it('refuses a late answer to the dropped form instead of resuming with it', async () => {
+      configureRequestUserInputResumption({ drive: mocks.drive, publish: async () => {} });
+      mocks.queue.clear();
+      mocks.queueCreate.mockClear();
+      await openPromptAndDropConnection('toolu_X');
+      askAgain('toolu_Y');
+      const channel = `request-user-input-response:${sessionId}:toolu_Y`;
+      await vi.waitFor(() => expect(ipcMainStub.listenerCount(channel)).toBe(1), { timeout: 2000 });
+      // Let a replacement in flight finish before the answers arrive.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(await submitThroughHandler('toolu_Y', { farbe: { type: 'singleSelect', selectedId: 'rot' } })).toMatchObject({ success: true });
+      const late = await submitThroughHandler('toolu_X', { farbe: { type: 'singleSelect', selectedId: 'rot' } });
+
+      expect(late).toEqual({ success: false, error: 'This form is already closed.' });
+      expect(mocks.queueCreate).not.toHaveBeenCalled();
+    });
   });
 });
 

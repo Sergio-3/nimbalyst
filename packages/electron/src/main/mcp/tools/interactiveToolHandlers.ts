@@ -37,6 +37,7 @@ import { SessionCommitService } from "../../services/SessionCommitService";
 import { resolveGitCommitProposalTarget } from "../../services/gitCommitProposalTarget";
 import { findFreshInteractiveResponse } from "./interactiveResponsePolling";
 import { isInteractivePromptClosed } from "../../services/ai/questionTerminalResultLookup";
+import { replaceOrphanedQuestions } from "../../services/ai/replaceOrphanedQuestions";
 import {
   loadPromptAnswerFacts,
   notePromptAbandoned,
@@ -1316,6 +1317,8 @@ export async function handleRequestUserInput(
   // NIM-2208: separate registry (see interactivePromptLiveness) so the
   // stale-prompt reconcile knows this session is genuinely blocked.
   if (sessionId) noteLiveInteractivePrompt(sessionId);
+  // The agent asked again: a form of this session whose call dropped is dead.
+  if (sessionId) void replaceOrphanedQuestions(sessionId, promptId);
 
   return new Promise((resolve) => {
     let settled = false;

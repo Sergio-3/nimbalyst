@@ -836,7 +836,9 @@ export const RequestUserInputWidget: React.FC<CustomToolWidgetProps> = ({ messag
   const parsedResult = useMemo(() => parseResult(rawResult), [rawResult]);
   // The user sent a new message instead of answering. Older transcripts have
   // no durable result for this, so the transcript also passes `superseded`.
-  const isSkipped = parsedResult?.reason === 'superseded' || (parsedResult === null && superseded === true);
+  // `replaced`: the agent asked again after this form's call dropped.
+  const isReplaced = parsedResult?.reason === 'replaced';
+  const isSkipped = parsedResult?.reason === 'superseded' || isReplaced || (parsedResult === null && superseded === true);
   const isCompleted = parsedResult !== null || isSkipped;
   const isPending = !isCompleted;
 
@@ -977,7 +979,7 @@ export const RequestUserInputWidget: React.FC<CustomToolWidgetProps> = ({ messag
               data-testid="request-user-input-skipped-note"
               className="request-user-input-skipped-note text-xs text-nim-muted italic select-text"
             >
-              You sent a new message instead of answering.
+              {isReplaced ? 'The agent asked again below.' : 'You sent a new message instead of answering.'}
             </div>
           )}
           <CompletedSummary

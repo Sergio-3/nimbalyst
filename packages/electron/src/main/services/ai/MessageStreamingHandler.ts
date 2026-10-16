@@ -5,6 +5,7 @@ import { sessionInbox } from './sessionInboxService';
 import { codexQuestionTurns } from './codexQuestionTurns';
 import { supersedeOpenQuestions } from './supersedeOpenQuestions';
 import { closeExpiredToolPermission } from './expiredToolPermission';
+import { replaceOrphanedQuestions } from './replaceOrphanedQuestions';
 /**
  * Streaming message handler for AIService.
  *
@@ -1036,6 +1037,7 @@ export class MessageStreamingHandler {
       },
       workspacePath: effectiveWorkspacePath,
       logError: (message, err) => { logger.main.error(`[AIService] ${message}:`, err); },
+      replaceOrphanedQuestions: (sessionId, newPromptId) => { void replaceOrphanedQuestions(sessionId, newPromptId); },
     });
     this.installListener(provider, 'askUserQuestion:pending', askUserQuestionListeners.onPending);
     this.installListener(provider, 'askUserQuestion:answered', askUserQuestionListeners.onAnswered);

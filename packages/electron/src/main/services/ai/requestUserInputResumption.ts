@@ -319,6 +319,34 @@ export function planPromptAnswer(input: {
   return "enqueue";
 }
 
+/**
+ * Run `close` for a form that nobody waits for and nobody answered, under the
+ * claim an answer takes, so a concurrent answer is decided cleanly. The form
+ * counts as orphaned exactly when a cancel from the user would close it now;
+ * a form whose call may still be starting, or with a stored answer, is left
+ * alone. True when `close` ran.
+ */
+export function closeOrphanedPromptForUserInput(
+  sessionId: string,
+  toolUseId: string,
+  close: () => Promise<void>,
+): Promise<boolean> {
+  return claimPromptAnswer(promptKey(sessionId, toolUseId), async () => {
+    const facts = await loadPromptAnswerFacts(sessionId, toolUseId);
+    if (facts.responses.length > 0) return false;
+    const step = planPromptAnswer({
+      facts,
+      cancelled: true,
+      abandoned: isPromptAbandoned(sessionId, toolUseId),
+      configured: true,
+      turnEndedAt: turnEndedAt.get(sessionId),
+    });
+    if (step !== "cancel") return false;
+    await close();
+    return true;
+  });
+}
+
 export function buildResumeMessage(input: {
   toolUseId: string;
   title?: string;

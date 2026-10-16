@@ -52,6 +52,8 @@ export interface AskUserQuestionListenerDeps {
   showBlockedNotification: (sessionId: string, sessionTitle: string) => void;
   /** Stamped onto the renderer payloads so the right window picks them up. */
   workspacePath: string | undefined;
+  /** Close the session's forms this question replaces (fire-and-forget). */
+  replaceOrphanedQuestions?: (sessionId: string, newPromptId: string) => void;
   logError: (message: string, error: unknown) => void;
 }
 
@@ -67,6 +69,7 @@ export function createAskUserQuestionListeners(
   const onPending = async (data: AskUserQuestionEventData): Promise<void> => {
     deps.sendToRenderer('ai:askUserQuestion', { ...data, workspacePath: deps.workspacePath });
     deps.openPrompt(data.sessionId, data.questionId, 'decision');
+    deps.replaceOrphanedQuestions?.(data.sessionId, data.questionId);
 
     // waiting_for_input is what makes every window show the pending indicator.
     deps.updateSessionActivity({

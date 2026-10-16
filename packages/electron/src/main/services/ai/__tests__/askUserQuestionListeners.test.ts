@@ -13,6 +13,7 @@ function makeDeps() {
     showBlockedNotification: vi.fn(),
     workspacePath: '/work',
     logError: vi.fn(),
+    replaceOrphanedQuestions: vi.fn(),
   };
   return { deps, listeners: createAskUserQuestionListeners(deps) };
 }
@@ -34,6 +35,13 @@ describe('askUserQuestion host listeners', () => {
       status: 'waiting_for_input',
     });
     expect(deps.showBlockedNotification).toHaveBeenCalledWith('s1', 'Session title');
+  });
+
+  it('lets the new question replace the session\'s dropped forms', async () => {
+    const { deps, listeners } = makeDeps();
+    await listeners.onPending(PENDING);
+
+    expect(deps.replaceOrphanedQuestions).toHaveBeenCalledWith('s1', 'q1');
   });
 
   it('clears the prompt and resumes streaming on a real answer', () => {

@@ -25,6 +25,7 @@ import {
   type InteractivePromptSettleReason,
 } from "./interactivePromptAbandonment";
 import { findFreshInteractiveResponse } from "./interactiveResponsePolling";
+import { replaceOrphanedQuestions } from "../../services/ai/replaceOrphanedQuestions";
 
 type McpToolResult = {
   content: Array<{ type: string; text: string }>;
@@ -225,6 +226,8 @@ export async function handleAskUserQuestion(
   // the stale-prompt reconcile can never clear the "awaiting input" bit while
   // this handler is genuinely blocked.
   if (sessionId) noteLiveInteractivePrompt(sessionId);
+  // The agent asked again: a form of this session whose call dropped is dead.
+  if (sessionId) void replaceOrphanedQuestions(sessionId, questionId);
 
   return new Promise((resolve) => {
     let settled = false;
